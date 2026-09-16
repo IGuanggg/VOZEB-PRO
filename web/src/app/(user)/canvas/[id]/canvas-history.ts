@@ -83,13 +83,29 @@ export function isCanvasHistorySessionActive(boundary: CanvasHistoryBoundary): b
 }
 
 /**
+ * 节点或连线的**身份**发生变化即为结构变化：新增、删除、粘贴、导入、连线增删。
+ * 这类变化本身就是语义边界，应当各自成为一步历史，不能被合并窗口和后面的操作黏在一起。
+ */
+export function isStructuralCanvasHistoryChange(previous: CanvasHistoryEntry, next: CanvasHistoryEntry): boolean {
+    if (previous.nodes.length !== next.nodes.length) return true;
+    if (previous.connections.length !== next.connections.length) return true;
+    const previousNodeIds = new Set(previous.nodes.map((node) => node.id));
+    if (next.nodes.some((node) => !previousNodeIds.has(node.id))) return true;
+    const previousConnectionIds = new Set(previous.connections.map((connection) => connection.id));
+    return next.connections.some((connection) => !previousConnectionIds.has(connection.id));
+}
+
+/**
  * 决定屏幕上的变化怎么进历史：
- * - flush：跨越语义边界（拖动开始/结束、文本编辑会话开始/切换/结束）时立即提交；
- * - schedule：离散操作（增删节点、连线、批量导入等）沿用原有 180ms 合并窗口，各自成为一步历史；
+ * - flush：跨越语义边界时立即提交——拖动开始/结束、文本编辑会话开始/切换/结束，
+ *   以及**结构变化**（增删节点/连线）。同一 tick 内的批量导入只产生一次渲染，因此仍是一步。
+ * - schedule：仅有内容/属性变化（打字、改配置、拖动中的位置）时，沿用原有 180ms 合并窗口，
+ *   避免逐字产生历史；
  * - hold：没有变化，或正处在拖动/文本编辑会话中，等下一次边界或合并窗口再提交。
  */
-export function planCanvasHistoryCommit(previous: CanvasHistoryBoundary, next: CanvasHistoryBoundary, changed: boolean): CanvasHistoryCommitPlan {
+export function planCanvasHistoryCommit(previous: CanvasHistoryBoundary, next: CanvasHistoryBoundary, change: { changed: boolean; structural: boolean }): CanvasHistoryCommitPlan {
     if (previous.dragging !== next.dragging || previous.editingNodeId !== next.editingNodeId) return "flush";
     if (isCanvasHistorySessionActive(next)) return "hold";
-    return changed ? "schedule" : "hold";
+    if (change.structural) return "flush";
+    return change.changed ? "schedule" : "hold";
 }

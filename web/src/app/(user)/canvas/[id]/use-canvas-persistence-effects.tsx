@@ -7,7 +7,7 @@ import { CanvasNodeType, isCanvasImageNodeType } from "../types";
 import { classifyCanvasVideoTaskFailure } from "./canvas-video-task-recovery";
 
 import { NODE_STATUS_ERROR, NODE_STATUS_LOADING } from "./canvas-page-elements";
-import { CANVAS_HISTORY_MERGE_WINDOW_MS, isSameCanvasHistoryEntry, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary } from "./canvas-history";
+import { CANVAS_HISTORY_MERGE_WINDOW_MS, isSameCanvasHistoryEntry, isStructuralCanvasHistoryChange, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary } from "./canvas-history";
 import { buildGenerationConfig, hydrateAssistantImages, hydrateCanvasImages, isGenerationCanceled, normalizeCanvasConfigNodeLayout } from "./canvas-page-utils";
 import { pauseCanvasGenerationReview } from "./canvas-generation-review";
 
@@ -333,7 +333,7 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
         historyBoundaryRef.current = boundary;
         const current = createHistoryEntry();
         const head = lastHistoryRef.current;
-        const plan = head && !applyingHistoryRef.current ? planCanvasHistoryCommit(previousBoundary, boundary, !isSameCanvasHistoryEntry(head, current)) : "hold";
+        const plan = head && !applyingHistoryRef.current ? planCanvasHistoryCommit(previousBoundary, boundary, { changed: !isSameCanvasHistoryEntry(head, current), structural: isStructuralCanvasHistoryChange(head, current) }) : "hold";
 
         if (plan === "flush" && head) {
             // 语义边界（拖动开始/结束、文本编辑会话开始/切换/结束）立即提交，拖动不按帧、文本编辑不按停顿拆步

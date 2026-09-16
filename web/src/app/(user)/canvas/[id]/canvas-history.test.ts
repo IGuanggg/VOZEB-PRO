@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CanvasNodeType } from "../types";
 
-import { CANVAS_HISTORY_MERGE_WINDOW_MS, CANVAS_HISTORY_PAST_LIMIT, isSameCanvasHistoryEntry, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary, type CanvasHistoryTimeline } from "./canvas-history";
+import { CANVAS_HISTORY_MERGE_WINDOW_MS, CANVAS_HISTORY_PAST_LIMIT, isSameCanvasHistoryEntry, isStructuralCanvasHistoryChange, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary, type CanvasHistoryTimeline } from "./canvas-history";
 
 import type { CanvasHistoryEntry } from "./canvas-page-elements";
 
@@ -15,6 +15,28 @@ function state(label: string): CanvasHistoryEntry {
         backgroundMode: "lines",
         showImageInfo: false,
     };
+}
+
+/** 结构变化：节点集合不同（增删/粘贴/导入）。 */
+function nodesState(nodeIds: string[]): CanvasHistoryEntry {
+    return {
+        nodes: nodeIds.map((id) => ({ id, type: CanvasNodeType.Text, title: id, position: { x: 0, y: 0 }, width: 320, height: 180, metadata: { content: id } })),
+        connections: [],
+        chatSessions: [],
+        activeChatId: null,
+        backgroundMode: "lines",
+        showImageInfo: false,
+    };
+}
+
+/** 仅位置变化：真实拖动是同一个节点、同一个集合。 */
+function positionState(nodeId: string, x: number): CanvasHistoryEntry {
+    return { ...nodesState([nodeId]), nodes: [{ id: nodeId, type: CanvasNodeType.Text, title: nodeId, position: { x, y: 0 }, width: 320, height: 180, metadata: { content: "拖动" } }] };
+}
+
+/** 仅内容变化：真实文字编辑是同一个节点、同一个集合。 */
+function contentState(nodeId: string, content: string): CanvasHistoryEntry {
+    return { ...nodesState([nodeId]), nodes: [{ id: nodeId, type: CanvasNodeType.Text, title: nodeId, position: { x: 0, y: 0 }, width: 320, height: 180, metadata: { content } }] };
 }
 
 describe("Canvas history transitions", () => {
@@ -168,33 +190,50 @@ describe("Canvas history commit scheduling", () => {
         vi.useRealTimers();
     });
 
-    it("plans an immediate commit on semantic boundaries and the merge window for discrete changes", () => {
+    it("plans an immediate commit on semantic boundaries, structural changes and the merge window for content edits", () => {
         const idle: CanvasHistoryBoundary = { dragging: false, editingNodeId: null };
         const dragging: CanvasHistoryBoundary = { dragging: true, editingNodeId: null };
         const editing: CanvasHistoryBoundary = { dragging: false, editingNodeId: "node-text" };
 
-        expect(planCanvasHistoryCommit(idle, dragging, false)).toBe("flush");
-        expect(planCanvasHistoryCommit(dragging, idle, true)).toBe("flush");
-        expect(planCanvasHistoryCommit(idle, editing, true)).toBe("flush");
-        expect(planCanvasHistoryCommit(editing, idle, true)).toBe("flush");
-        expect(planCanvasHistoryCommit(dragging, dragging, true)).toBe("hold");
-        expect(planCanvasHistoryCommit(editing, editing, true)).toBe("hold");
-        expect(planCanvasHistoryCommit(idle, idle, false)).toBe("hold");
-        expect(planCanvasHistoryCommit(idle, idle, true)).toBe("schedule");
+        expect(planCanvasHistoryCommit(idle, dragging, { changed: false, structural: false })).toBe("flush");
+        expect(planCanvasHistoryCommit(dragging, idle, { changed: true, structural: false })).toBe("flush");
+        expect(planCanvasHistoryCommit(idle, editing, { changed: true, structural: false })).toBe("flush");
+        expect(planCanvasHistoryCommit(editing, idle, { changed: true, structural: false })).toBe("flush");
+        expect(planCanvasHistoryCommit(dragging, dragging, { changed: true, structural: false })).toBe("hold");
+        expect(planCanvasHistoryCommit(editing, editing, { changed: true, structural: false })).toBe("hold");
+        expect(planCanvasHistoryCommit(idle, idle, { changed: false, structural: false })).toBe("hold");
+        expect(planCanvasHistoryCommit(idle, idle, { changed: true, structural: false })).toBe("schedule");
+        // 增删节点/连线本身就是语义边界，不等待合并窗口。
+        expect(planCanvasHistoryCommit(idle, idle, { changed: true, structural: true })).toBe("flush");
+    });
+
+    it("commits structural changes immediately so two separate operations stay two undo steps", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const empty = nodesState([]);
+        const one = nodesState(["node-a"]);
+        const two = nodesState(["node-a", "node-b"]);
+        harness.load(empty);
+
+        harness.change(one);
+        harness.change(two); // 不等待合并窗口
+        expect(harness.timeline().past).toHaveLength(2);
+
+        expect(harness.undo()).toBe(one); // 第一次撤销只撤掉第二个节点
+        expect(harness.undo()).toBe(empty);
+        expect(vi.getTimerCount()).toBe(0);
     });
 
     it("keeps two independent node deletions as two undo steps", () => {
         vi.useFakeTimers();
         const harness = createCommitHarness();
-        const loaded = state("loaded");
-        const afterDeleteA = state("delete-A");
-        const afterDeleteB = state("delete-B");
+        const loaded = nodesState(["node-a", "node-b"]);
+        const afterDeleteA = nodesState(["node-b"]);
+        const afterDeleteB = nodesState([]);
         harness.load(loaded);
 
         harness.change(afterDeleteA);
-        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS);
         harness.change(afterDeleteB);
-        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS);
 
         expect(harness.timeline().past).toHaveLength(2);
         expect(harness.undo()).toBe(afterDeleteA); // 第一次撤销只恢复最后一次删除
@@ -204,13 +243,13 @@ describe("Canvas history commit scheduling", () => {
     it("merges a continuous drag with many node updates into a single history step", () => {
         vi.useFakeTimers();
         const harness = createCommitHarness();
-        const loaded = state("loaded");
-        const moved = state("dragged");
+        const loaded = positionState("node-a", 0);
+        const moved = positionState("node-a", 120);
         harness.load(loaded);
 
         harness.change(loaded, { dragging: true }); // 按下节点：语义边界，此时还没有位置变化
-        harness.change(state("drag-1"), { dragging: true }); // 拖动中的多次更新只累积，不按帧拆步
-        harness.change(state("drag-2"), { dragging: true });
+        harness.change(positionState("node-a", 40), { dragging: true }); // 拖动中的多次更新只累积，不按帧拆步
+        harness.change(positionState("node-a", 80), { dragging: true });
         harness.change(moved, { dragging: true });
         vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
         expect(harness.timeline().past).toHaveLength(0);
@@ -225,13 +264,13 @@ describe("Canvas history commit scheduling", () => {
     it("merges a whole text editing session into a single history step", () => {
         vi.useFakeTimers();
         const harness = createCommitHarness();
-        const loaded = state("loaded");
-        const edited = state("edited-text");
+        const loaded = contentState("node-a", "原文");
+        const edited = contentState("node-a", "原文改好");
         harness.load(loaded);
 
-        harness.change(loaded, { editingNodeId: "node-text" }); // 进入文本编辑：语义边界，此时还没有输入
-        harness.change(state("typing-1"), { editingNodeId: "node-text" }); // 编辑会话中的多次输入只累积
-        harness.change(edited, { editingNodeId: "node-text" });
+        harness.change(loaded, { editingNodeId: "node-a" }); // 进入文本编辑：语义边界，此时还没有输入
+        harness.change(contentState("node-a", "原文改"), { editingNodeId: "node-a" }); // 编辑会话中的多次输入只累积
+        harness.change(edited, { editingNodeId: "node-a" });
         vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 5);
         expect(harness.timeline().past).toHaveLength(0);
         harness.change(edited, { editingNodeId: null }); // 退出编辑会话：边界提交整段编辑
@@ -244,15 +283,15 @@ describe("Canvas history commit scheduling", () => {
     it("commits the live screen state when the merge window fires", () => {
         vi.useFakeTimers();
         const harness = createCommitHarness();
-        const loaded = state("loaded");
+        const loaded = contentState("node-a", "原文");
         harness.load(loaded);
 
-        harness.change(state("upload-placeholder")); // 合并窗口开始
-        harness.change(state("placeholder-deleted")); // 占位节点被删除，窗口重新计算
+        harness.change(contentState("node-a", "第一次输入")); // 合并窗口开始
+        harness.change(contentState("node-a", "第二次输入")); // 窗口重新计算，只提交窗口内的最终状态
         vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS);
 
         expect(harness.timeline().past[0]).toBe(loaded);
-        expect(harness.undo()).toBe(loaded); // 迟到的提交不会把已经删掉的占位节点写回历史
+        expect(harness.undo()).toBe(loaded); // 迟到的合并窗口提交不会把过期快照写回历史
     });
 });
 
@@ -282,7 +321,7 @@ function createCommitHarness() {
         },
         change(entry: CanvasHistoryEntry, next: Partial<CanvasHistoryBoundary> = {}) {
             const nextBoundary = { ...boundary, ...next };
-            const plan = planCanvasHistoryCommit(boundary, nextBoundary, !isSameCanvasHistoryEntry(head, entry));
+            const plan = planCanvasHistoryCommit(boundary, nextBoundary, { changed: !isSameCanvasHistoryEntry(head, entry), structural: Boolean(head) && isStructuralCanvasHistoryChange(head!, entry) });
             boundary = nextBoundary;
             screen = entry;
             if (timer) {
