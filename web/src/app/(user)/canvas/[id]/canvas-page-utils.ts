@@ -141,7 +141,28 @@ export function canvasUploadPlaceholderNode(kind: CanvasUploadKind, id: string, 
 }
 
 export function isCanvasUploadPlaceholder(node: CanvasNodeData | undefined) {
-    return Boolean(node && (node.metadata?.status === "uploading" || node.metadata?.uploadFailed));
+    return Boolean(node && (isCanvasUploading(node) || node.metadata?.uploadFailed));
+}
+
+/** 仍在等结果的上传占位节点：只有这种节点会在回填后变更历史步骤归属。 */
+export function isCanvasUploading(node: CanvasNodeData | undefined) {
+    return node?.metadata?.status === "uploading";
+}
+
+/**
+ * 恢复没有内存任务的上传占位快照时，把它变成明确可操作的重选文件状态：
+ * 刷新恢复、撤销/重做回到占位快照都必须走这一条，不能恢复成永远等不到结果的“上传中”。
+ * 节点完全没变时返回原数组，避免无意义的重渲染。
+ */
+export function restoreCanvasUploadNodes(nodes: CanvasNodeData[]): CanvasNodeData[] {
+    if (!nodes.some((node) => isCanvasUploading(node) && !readCanvasUploadTask(node.id))) return nodes;
+    return nodes.map((node) => (isCanvasUploading(node) && !readCanvasUploadTask(node.id) ? restoreCanvasUploadNode(node) : node));
+}
+
+/** 依据“是否还有内存任务”把上传占位节点标成可重试错误；有任务的继续等回填。 */
+export function restoreCanvasUploadNode(node: CanvasNodeData): CanvasNodeData {
+    if (!isCanvasUploading(node) || readCanvasUploadTask(node.id)) return node;
+    return { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, uploadFailed: true, errorDetails: CANVAS_UPLOAD_RESTART_HINT } };
 }
 
 // 上传成功后原位填充同一个节点：保持中心点、换成服务端媒体 metadata，不新建节点。
@@ -319,7 +340,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
 
 async function hydrateCanvasNode(node: CanvasNodeData) {
     // 从服务端恢复出来的上传占位节点已经没有原始 File，只能标成可重试的错误并提示重新选择文件。
-    if (node.metadata?.status === "uploading") return { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, uploadFailed: true, errorDetails: CANVAS_UPLOAD_RESTART_HINT } };
+    if (isCanvasUploading(node)) return restoreCanvasUploadNode(node);
     const content = node.metadata?.content;
     const fallbackContent = generatedContentFallback(content, node.metadata?.remoteUrl, node.metadata?.serverUrl);
     if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, fallbackContent) } };

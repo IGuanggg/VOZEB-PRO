@@ -15,6 +15,7 @@ import {
     isCanvasUploadFile,
     readCanvasUploadTask,
     releaseCanvasUploadPreview,
+    restoreCanvasUploadNodes,
     updateCanvasUploadNode,
 } from "./canvas-page-utils";
 
@@ -104,6 +105,25 @@ describe("画布上传占位节点", () => {
         endCanvasUploadTask("image-1");
         expect(readCanvasUploadTask("image-1")).toBeUndefined();
         expect(canvasUploadPreviewUrl("image-1")).toBe("");
+    });
+
+    it("恢复没有内存任务的上传占位时明确变成可重选文件，不影响还有任务的上传", () => {
+        const interrupted = canvasUploadPlaceholderNode("image", "image-1", file("打断.png"), { x: 0, y: 0 });
+        // 没有任何内存任务（刷新恢复、取消后撤销、重做回旧占位）：不能恢复成永远等不到结果的“上传中”。
+        const restored = restoreCanvasUploadNodes([interrupted]);
+        expect(restored[0]?.metadata).toMatchObject({ status: "error", uploadFailed: true, errorDetails: CANVAS_UPLOAD_RESTART_HINT });
+
+        // 这次上传还在页面内存里：仍留在“上传中”，等它自己的回填，不能提前标成失败。
+        const active = beginCanvasUploadTask(PROJECT, "image-2", "image", file("进行中.png"));
+        const pending = canvasUploadPlaceholderNode("image", "image-2", file("进行中.png"), { x: 0, y: 0 });
+        expect(restoreCanvasUploadNodes([pending])[0]?.metadata).toMatchObject({ status: "uploading" });
+        endCanvasUploadTask(active.nodeId);
+
+        // 已经不是占位的节点与无变化数组都原样返回，不制造额外引用变化。
+        const settled = canvasUploadPlaceholderNode("image", "image-3", file("完成.png"), { x: 0, y: 0 });
+        const done = { ...settled, metadata: { status: "success" as const, content: "/api/reference-assets/permanent/done.webp" } };
+        const untouched = [done];
+        expect(restoreCanvasUploadNodes(untouched)).toBe(untouched);
     });
 
     it("基本校验不通过的文件不占用画布", () => {

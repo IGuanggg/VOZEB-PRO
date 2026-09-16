@@ -1,3 +1,5 @@
+import type { CanvasNodeData } from "../types";
+
 import type { CanvasHistoryEntry } from "./canvas-page-elements";
 
 /** 画布历史时间线：past 顶是 HEAD 的直接前态，future 顶是 HEAD 的直接后态。 */
@@ -25,21 +27,14 @@ export const CANVAS_HISTORY_PAST_LIMIT = 50;
 /** 离散操作沿用的合并窗口，保持项目原有 180ms，不缩短也不新增延时。 */
 export const CANVAS_HISTORY_MERGE_WINDOW_MS = 180;
 
+/** 连线、会话、背景等非节点字段同引用。 */
+function isSameCanvasHistoryFields(previous: CanvasHistoryEntry, next: CanvasHistoryEntry): boolean {
+    return previous.connections === next.connections && previous.chatSessions === next.chatSessions && previous.activeChatId === next.activeChatId && previous.backgroundMode === next.backgroundMode && previous.showImageInfo === next.showImageInfo;
+}
+
 /** 节点、连线、会话等都以不可变替换更新，字段引用相同即代表同一屏幕状态。 */
 export function isSameCanvasHistoryEntry(previous: CanvasHistoryEntry | null, next: CanvasHistoryEntry | null): boolean {
-    return (
-        previous === next ||
-        Boolean(
-            previous &&
-            next &&
-            previous.nodes === next.nodes &&
-            previous.connections === next.connections &&
-            previous.chatSessions === next.chatSessions &&
-            previous.activeChatId === next.activeChatId &&
-            previous.backgroundMode === next.backgroundMode &&
-            previous.showImageInfo === next.showImageInfo,
-        )
-    );
+    return previous === next || Boolean(previous && next && previous.nodes === next.nodes && isSameCanvasHistoryFields(previous, next));
 }
 
 /** 把快照压入 past：重复快照不入栈，并保持 50 步上限。 */
@@ -80,6 +75,58 @@ export function transitionCanvasHistory(timeline: CanvasHistoryTimeline, head: C
 /** 拖动或文本编辑会话进行中：变化只累积，不按帧、也不按打字停顿拆成多步历史。 */
 export function isCanvasHistorySessionActive(boundary: CanvasHistoryBoundary): boolean {
     return boundary.dragging || Boolean(boundary.editingNodeId);
+}
+
+/** 两个快照的非节点字段与节点逐个同引用，只允许节点数组本身不是同一个实例。 */
+function isSameCanvasHistoryContent(previous: CanvasHistoryEntry, next: CanvasHistoryEntry): boolean {
+    return isSameCanvasHistoryFields(previous, next) && previous.nodes.length === next.nodes.length && previous.nodes.every((node, index) => node === next.nodes[index]);
+}
+
+/**
+ * 一次导入只占一步历史：异步回填（占位拿到成功结果或可重试的失败）并入发起导入的那一步。
+ * - 回填结果同时写回 HEAD 与已入栈快照，撤销/重做恢复的是完成结果，而不是没有内存任务的“上传中”；
+ * - HEAD 与屏幕只剩下节点数组实例的差别时直接对齐屏幕状态，回填因此不再新增撤销步；
+ * - 期间的用户编辑不在这里处理，仍由调用方按语义边界/合并窗口提交，不会被回填吞并。
+ * `isUploading` 是调用方判定的“还在等结果”的占位节点谓词，历史层不引入上传语义。
+ */
+export function settleCanvasHistoryUploads(
+    timeline: CanvasHistoryTimeline,
+    head: CanvasHistoryEntry | null,
+    current: CanvasHistoryEntry,
+    isUploading: (node: CanvasNodeData) => boolean,
+): { timeline: CanvasHistoryTimeline; head: CanvasHistoryEntry | null } {
+    const uploadingById = new Set((head?.nodes ?? []).filter(isUploading).map((node) => node.id));
+    const results = new Map<string, CanvasNodeData>();
+    current.nodes.forEach((node) => {
+        if (uploadingById.has(node.id) && !isUploading(node)) results.set(node.id, node);
+    });
+    if (!results.size) return { timeline, head };
+
+    const settle = (entry: CanvasHistoryEntry) => {
+        let changed = false;
+        const nodes = entry.nodes.map((node) => {
+            const result = results.get(node.id);
+            if (!result || result === node || !isUploading(node)) return node;
+            changed = true;
+            return result;
+        });
+        return changed ? { ...entry, nodes } : entry;
+    };
+    const settleEntries = (entries: CanvasHistoryEntry[]) => {
+        let changed = false;
+        const next = entries.map((entry) => {
+            const settled = settle(entry);
+            if (settled !== entry) changed = true;
+            return settled;
+        });
+        return changed ? next : entries;
+    };
+
+    const settledHead = head ? settle(head) : null;
+    return {
+        timeline: { past: settleEntries(timeline.past), future: settleEntries(timeline.future) },
+        head: settledHead && isSameCanvasHistoryContent(settledHead, current) ? current : settledHead,
+    };
 }
 
 /**

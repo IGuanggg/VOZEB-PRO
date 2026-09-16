@@ -7,6 +7,7 @@ import { usePublicSessionStore } from "@/stores/use-public-session-store";
 import { useCanvasStore } from "../stores/use-canvas-store";
 
 import { transitionCanvasHistory } from "./canvas-history";
+import { restoreCanvasUploadNodes } from "./canvas-page-utils";
 import { CanvasHistoryEntry } from "./canvas-page-elements";
 
 import type { CanvasPageState } from "./use-canvas-page-state";
@@ -83,9 +84,12 @@ export function useCanvasNavigationActions({ state }: { state: CanvasPageState }
             historyCommitTimerRef.current = null;
         }
         applyingHistoryRef.current = true;
-        // HEAD 与即将恢复的快照同步对齐，恢复出来的屏幕状态不会再被当成一次新的未提交编辑
-        lastHistoryRef.current = entry;
-        setNodes(entry.nodes);
+        // 撤销/重做恢复到没有内存任务的上传占位时，把它明确变成可重选文件的状态，绝不恢复成幽灵“上传中”；
+        // 归一化后的快照同时写回 HEAD，恢复出来的屏幕状态不会被当成一次新的未提交编辑。
+        const nodes = restoreCanvasUploadNodes(entry.nodes);
+        const restoredEntry = nodes === entry.nodes ? entry : { ...entry, nodes };
+        lastHistoryRef.current = restoredEntry;
+        setNodes(nodes);
         setConnections(entry.connections);
         setChatSessions(entry.chatSessions);
         setActiveChatId(entry.activeChatId);

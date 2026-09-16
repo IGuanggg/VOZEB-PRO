@@ -1,10 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CanvasNodeType } from "../types";
+import { CanvasNodeType, type CanvasNodeData } from "../types";
 
-import { CANVAS_HISTORY_MERGE_WINDOW_MS, CANVAS_HISTORY_PAST_LIMIT, isSameCanvasHistoryEntry, isStructuralCanvasHistoryChange, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary, type CanvasHistoryTimeline } from "./canvas-history";
+import {
+    CANVAS_HISTORY_MERGE_WINDOW_MS,
+    CANVAS_HISTORY_PAST_LIMIT,
+    isSameCanvasHistoryEntry,
+    isStructuralCanvasHistoryChange,
+    planCanvasHistoryCommit,
+    settleCanvasHistoryUploads,
+    transitionCanvasHistory,
+    type CanvasHistoryBoundary,
+    type CanvasHistoryTimeline,
+} from "./canvas-history";
 
 import type { CanvasHistoryEntry } from "./canvas-page-elements";
+
+/** 与 canvas-page-utils 的 isCanvasUploading 同义：仍在等结果的上传占位节点。 */
+function isUploading(node: CanvasNodeData) {
+    return node.metadata?.status === "uploading";
+}
 
 function state(label: string): CanvasHistoryEntry {
     return {
@@ -37,6 +52,31 @@ function positionState(nodeId: string, x: number): CanvasHistoryEntry {
 /** 仅内容变化：真实文字编辑是同一个节点、同一个集合。 */
 function contentState(nodeId: string, content: string): CanvasHistoryEntry {
     return { ...nodesState([nodeId]), nodes: [{ id: nodeId, type: CanvasNodeType.Text, title: nodeId, position: { x: 0, y: 0 }, width: 320, height: 180, metadata: { content } }] };
+}
+
+/** 仍在等结果的上传占位节点：一个导入批次里先出现的就是这种。 */
+function uploadNode(id: string): CanvasNodeData {
+    return { id, type: CanvasNodeType.Image, title: id, position: { x: 0, y: 0 }, width: 240, height: 240, metadata: { status: "uploading" } };
+}
+
+/** 回填后的上传节点：保留永久 storageKey，这是撤销/重做必须恢复的结果。 */
+function filledNode(id: string): CanvasNodeData {
+    return { id, type: CanvasNodeType.Image, title: id, position: { x: 0, y: 0 }, width: 240, height: 240, metadata: { status: "success", content: `/api/reference-assets/permanent/${id}.webp`, storageKey: `permanent/${id}.webp` } };
+}
+
+function textNode(content: string): CanvasNodeData {
+    return { id: "node-text", type: CanvasNodeType.Text, title: "文本", position: { x: 0, y: 0 }, width: 320, height: 180, metadata: { content } };
+}
+
+/** 上传场景的快照：只替换回填的那个节点对象，未变的节点与其余字段沿用同一引用（与真实不可变更新一致）。 */
+const NO_CONNECTIONS: CanvasHistoryEntry["connections"] = [];
+const NO_SESSIONS: CanvasHistoryEntry["chatSessions"] = [];
+function uploadState(nodes: CanvasNodeData[]): CanvasHistoryEntry {
+    return { nodes, connections: NO_CONNECTIONS, chatSessions: NO_SESSIONS, activeChatId: null, backgroundMode: "lines", showImageInfo: false };
+}
+
+function hasUploadingSnapshot(entry: CanvasHistoryEntry) {
+    return entry.nodes.some(isUploading);
 }
 
 describe("Canvas history transitions", () => {
@@ -296,8 +336,138 @@ describe("Canvas history commit scheduling", () => {
 });
 
 /**
+ * R2 回归：一次导入（占位创建 + 各文件异步回填）在历史里只占一步。
+ * 回填结果写回导入那一步，撤销/重做拿到的是已完成的永久媒体，而不是没有内存任务的“上传中”。
+ */
+describe("Canvas history upload settle", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    /** 一次导入 A/B：占位先出现，随后按给定顺序回填。 */
+    function uploadScenario() {
+        const empty = uploadState([]);
+        const pending = uploadState([uploadNode("image-a"), uploadNode("image-b")]);
+        const afterA = uploadState([filledNode("image-a"), pending.nodes[1]!]);
+        const afterB = uploadState([afterA.nodes[0]!, filledNode("image-b")]);
+        return { empty, pending, afterA, afterB };
+    }
+
+    it("settles each finished file into the import step instead of creating undo steps", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const { empty, pending, afterA, afterB } = uploadScenario();
+        harness.load(empty);
+
+        harness.change(pending); // 占位创建：结构变化，导入本身成为一步
+        expect(harness.timeline().past).toHaveLength(1);
+
+        harness.change(afterA); // A 先回填并超过合并窗口
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+        expect(harness.timeline().past).toHaveLength(1);
+
+        harness.change(afterB); // B 再回填
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+        expect(harness.timeline().past).toHaveLength(1);
+        expect(vi.getTimerCount()).toBe(0);
+
+        // 一次撤销就完整撤回这次导入，且不会退回带“上传中”的占位快照。
+        const undo = harness.undo();
+        expect(undo).toBe(empty);
+        expect(harness.timeline().future).toHaveLength(1);
+        expect(hasUploadingSnapshot(harness.timeline().future[0]!)).toBe(false);
+    });
+
+    it("keeps B→A completion order on the same single undo step", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const empty = uploadState([]);
+        const pending = uploadState([uploadNode("image-a"), uploadNode("image-b")]);
+        // 返回顺序互换：B 先成功、A 后成功，历史结果必须与 A→B 一致。
+        const afterB = uploadState([pending.nodes[0]!, filledNode("image-b")]);
+        const afterBoth = uploadState([filledNode("image-a"), afterB.nodes[1]!]);
+        harness.load(empty);
+
+        harness.change(pending);
+        harness.change(afterB);
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+        harness.change(afterBoth);
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+
+        expect(harness.timeline().past).toHaveLength(1);
+        expect(harness.undo()).toBe(empty);
+    });
+
+    it("keeps adjacent completions in the same tick on the same single step", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const empty = uploadState([]);
+        const pending = uploadState([uploadNode("image-a"), uploadNode("image-b")]);
+        const both = uploadState([filledNode("image-a"), filledNode("image-b")]);
+        harness.load(empty);
+
+        harness.change(pending);
+        harness.change(both); // 两个文件在同一 tick 回填：一次渲染
+
+        expect(harness.timeline().past).toHaveLength(1);
+        expect(harness.undo()).toBe(empty);
+    });
+
+    it("keeps redo on the finished permanent media instead of a task-less uploading placeholder", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const { empty, pending, afterA, afterB } = uploadScenario();
+        harness.load(empty);
+
+        harness.change(pending);
+        harness.change(afterA);
+        harness.change(afterB);
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+
+        expect(harness.undo()).toBe(empty);
+
+        // 重做必须回到已完成的永久媒体：既不是占位，也不需要重新上传。
+        const redo = harness.redo();
+        expect(redo).toBe(afterB);
+        expect(redo?.nodes.map((node) => node.metadata?.storageKey)).toEqual(["permanent/image-a.webp", "permanent/image-b.webp"]);
+        expect(hasUploadingSnapshot(redo!)).toBe(false);
+    });
+
+    it("does not swallow an independent text edit made while the import is still uploading", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const base = uploadState([textNode("原文")]);
+        // 导入只追加占位：既有文字节点保持同一引用，符合真实不可变更新。
+        const pending = uploadState([base.nodes[0]!, uploadNode("image-a"), uploadNode("image-b")]);
+        const edited = textNode("原文改");
+        const afterEdit = uploadState([edited, pending.nodes[1]!, pending.nodes[2]!]);
+        const filledA = filledNode("image-a");
+        const filledB = filledNode("image-b");
+        harness.load(base);
+
+        harness.change(pending); // 导入：一步
+        harness.change(afterEdit); // 上传期间的独立文字编辑
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS); // 文字编辑按合并窗口各自成步
+        harness.change(uploadState([edited, filledA, pending.nodes[2]!])); // A 回填并入导入那一步
+        harness.change(uploadState([edited, filledA, filledB])); // B 回填并入导入那一步
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+
+        // 第一次撤销只退回文字编辑：正文恢复成原文，导入的图片和永久 storageKey 都保留。
+        const first = harness.undo();
+        expect(first?.nodes.map((node) => node.metadata?.content)).toEqual(["原文", "/api/reference-assets/permanent/image-a.webp", "/api/reference-assets/permanent/image-b.webp"]);
+        expect(first?.nodes.some((node) => node.metadata?.content === "原文改")).toBe(false);
+        expect(hasUploadingSnapshot(first!)).toBe(false);
+
+        // 第二次撤销才完整撤回导入，正文回到最初。
+        const second = harness.undo();
+        expect(second).toBe(base);
+        expect(hasUploadingSnapshot(second!)).toBe(false);
+    });
+});
+
+/**
  * 与 use-canvas-persistence-effects 相同的提交调度循环：提交时机由真实的 planCanvasHistoryCommit /
- * transitionCanvasHistory 决定，离散操作走 180ms 合并窗口，语义边界立即提交。
+ * transitionCanvasHistory 决定，先按真实实现结算上传回填，离散操作走 180ms 合并窗口，语义边界立即提交。
  * 仓库没有 @testing-library，React effect 本身不在 vitest 里执行，这里只回归这套调度契约。
  */
 function createCommitHarness() {
@@ -321,6 +491,10 @@ function createCommitHarness() {
         },
         change(entry: CanvasHistoryEntry, next: Partial<CanvasHistoryBoundary> = {}) {
             const nextBoundary = { ...boundary, ...next };
+            // 与真实 effect 相同：先结算上传回填，再按结算后的 HEAD 规划这次变化
+            const settled = settleCanvasHistoryUploads(timeline, head, entry, isUploading);
+            timeline = settled.timeline;
+            head = settled.head;
             const plan = planCanvasHistoryCommit(boundary, nextBoundary, { changed: !isSameCanvasHistoryEntry(head, entry), structural: Boolean(head) && isStructuralCanvasHistoryChange(head!, entry) });
             boundary = nextBoundary;
             screen = entry;

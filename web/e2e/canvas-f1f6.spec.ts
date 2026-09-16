@@ -634,9 +634,7 @@ test("R5a 撤销草稿后，面板保持打开也要显示并提交撤销后的�
         // 因此一次撤销必须直接回到草稿 A。
         await focusCanvasSurface(page, surface);
         await page.locator('[aria-label="撤销"]').click();
-        await expect
-            .poll(async () => ((await readCanvasNodeMetadata(request, projectPath, "draft-sync-a")) as { promptDraft?: string } | null)?.promptDraft ?? "", { timeout: 4_000, intervals: [300] })
-            .toBe("草稿A");
+        await expect.poll(async () => ((await readCanvasNodeMetadata(request, projectPath, "draft-sync-a")) as { promptDraft?: string } | null)?.promptDraft ?? "", { timeout: 4_000, intervals: [300] }).toBe("草稿A");
 
         // 回到 A 后，面板显示的必须是 A；重做应回到 B 且显示同步。
         await expect(promptBox).toHaveValue("草稿A");
@@ -678,6 +676,149 @@ test("R5b 撤销草稿后放大编辑器也显示撤销后的文本", async ({ p
         const dialog = page.getByRole("dialog", { name: "编辑提示词" });
         await expect(dialog).toBeVisible();
         await expect(dialog.getByRole("textbox", { name: "提示词编辑器" })).toHaveValue("放大前草稿A");
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R2 一次导入的多文件回填只占一步撤销，重做恢复永久媒体", async ({ page, request }) => {
+    // R2 回归：占位创建只合在一次渲染里（一个导入 = 一步历史），但每个文件成功后的回填原先仍是
+    // 普通 nodes 内容变更，会各自走进 180ms 合并窗口、把它前面的“上传中”快照压进历史；
+    // 上传任务的原始 File 随后被释放，撤销就会退回没有任务的幽灵占位。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R2 upload settle"),
+        viewport: { x: 0, y: 0, k: 1 },
+        nodes: [],
+        connections: [],
+    });
+    const fixture = uploadFixture();
+    const files = ["canvas-r2a-one.webp", "canvas-r2a-two.webp"];
+    const { release } = await holdCanvasUploads(page, fixture, files);
+    let posts = 0;
+    page.on("request", (request) => {
+        if (request.method() === "POST" && request.url().endsWith("/api/reference-assets")) posts += 1;
+    });
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodes = page.locator("[data-node-id]");
+        const uploading = nodes.filter({ hasText: "上传中" });
+        await expect(nodes).toHaveCount(0);
+
+        await dropCanvasFiles(surface, fixture, files);
+        await expect(uploading).toHaveCount(2);
+
+        // A 先返回：节点原位填充成永久媒体。
+        await release(files[0]!);
+        await expect(uploading).toHaveCount(1);
+        // 间隔超过 180ms 合并窗口后再让 B 返回，前后两次回填都必须是导入那一步的内部变化。
+        await page.waitForTimeout(260);
+        await release(files[1]!);
+        await expect(uploading).toHaveCount(0);
+        await expect.poll(() => page.locator('[data-node-id] img[src*="/api/reference-assets/permanent/canvas-r2a-"]').count()).toBe(2);
+        expect(posts).toBe(2);
+
+        // 一次撤销完整撤回这次导入：两个文件一起消失，而不是先退回一个“上传中”。
+        await focusCanvasSurface(page, surface);
+        await page.keyboard.press("Control+z");
+        await expect(nodes).toHaveCount(0);
+
+        // 重做恢复的是已完成的永久媒体，不会重新发起上传。
+        await page.keyboard.press("Control+Shift+z");
+        await expect(nodes).toHaveCount(2);
+        await expect(uploading).toHaveCount(0);
+        expect(posts).toBe(2);
+        await expect.poll(() => page.locator('[data-node-id] img[src*="/api/reference-assets/permanent/canvas-r2a-"]').count()).toBe(2);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R2 逆序回填与上传期间的独立文字编辑各自成步", async ({ page, request }) => {
+    // R2 的第二半验收：B→A 的返回顺序、上传期间穿插的独立文字编辑，都不能改变撤销顺序，
+    // 也不能让文字编辑被回填吞并。
+    const content = "上传期间的正文";
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R2 interleaved edit"),
+        viewport: { x: 60, y: 60, k: 1 },
+        nodes: [node("r2-text", "text", 60, 140, 320, 200, { content })],
+        connections: [],
+    });
+    const fixture = uploadFixture();
+    const files = ["canvas-r2b-one.webp", "canvas-r2b-two.webp"];
+    const { release } = await holdCanvasUploads(page, fixture, files);
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodes = page.locator("[data-node-id]");
+        const textarea = page.locator(`[data-node-id="r2-text"] ${TEXT_NODE_CONTENT}`);
+        const uploading = nodes.filter({ hasText: "上传中" });
+
+        await dropCanvasFiles(surface, fixture, files);
+        await expect(uploading).toHaveCount(2);
+
+        // 上传仍在进行时编辑正文：这是一次独立用户操作，必须自己成步。
+        await textarea.click();
+        await page.keyboard.type("改");
+        const edited = await textarea.inputValue();
+        expect(edited).toContain("改");
+        await focusCanvasSurface(page, surface);
+
+        // 第二个文件先返回、第一个后返回（逆序 + 超过合并窗口）。
+        await release(files[1]!);
+        await expect(uploading).toHaveCount(1);
+        await page.waitForTimeout(260);
+        await release(files[0]!);
+        await expect(uploading).toHaveCount(0);
+
+        // 时间线：导入 -> 文字编辑。第一次撤销只退回正文，导入的永久媒体保留。
+        await page.keyboard.press("Control+z");
+        await expect(textarea).toHaveValue(content);
+        await expect.poll(() => page.locator('[data-node-id] img[src*="/api/reference-assets/permanent/canvas-r2b-"]').count()).toBe(2);
+        await expect(uploading).toHaveCount(0);
+
+        // 第二次撤销才完整撤回导入。
+        await page.keyboard.press("Control+z");
+        await expect(page.locator('[data-node-id="r2-text"]')).toHaveCount(1);
+        await expect(page.locator("[data-node-id] img")).toHaveCount(0);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R2 相邻返回的两个文件同样只占一步撤销", async ({ page, request }) => {
+    // R2 的相邻返回：两个文件几乎同时回填（同一个合并窗口内），仍然只能产生一步历史。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R2 adjacent settle"),
+        viewport: { x: 0, y: 0, k: 1 },
+        nodes: [],
+        connections: [],
+    });
+    const fixture = uploadFixture();
+    const files = ["canvas-r2c-one.webp", "canvas-r2c-two.webp"];
+    const { release } = await holdCanvasUploads(page, fixture, files);
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodes = page.locator("[data-node-id]");
+        const uploading = nodes.filter({ hasText: "上传中" });
+
+        await dropCanvasFiles(surface, fixture, files);
+        await expect(uploading).toHaveCount(2);
+
+        // 不放隔断：两个响应紧挨着回来。
+        await release(files[0]!);
+        await release(files[1]!);
+        await expect(uploading).toHaveCount(0);
+        await expect.poll(() => page.locator('[data-node-id] img[src*="/api/reference-assets/permanent/canvas-r2c-"]').count()).toBe(2);
+
+        await focusCanvasSurface(page, surface);
+        await page.keyboard.press("Control+z");
+        await expect(nodes).toHaveCount(0);
+
+        await page.keyboard.press("Control+Shift+z");
+        await expect(nodes).toHaveCount(2);
+        await expect(uploading).toHaveCount(0);
     } finally {
         await deleteCanvasProject(request, project.id);
     }
@@ -784,6 +925,44 @@ async function requireBoundingBox(locator: Locator) {
     const box = await locator.boundingBox();
     expect(box, "元素没有可见的 boundingBox").not.toBeNull();
     return box!;
+}
+
+// 多文件导入在真实 UI 里只有拖放一条路径（隐藏 input 只取 files[0]）：合成一次带 DataTransfer 的 drop，
+// 占位创建因此和真实拖放一样落在同一个渲染里。
+async function dropCanvasFiles(surface: Locator, fixture: Buffer, names: string[]) {
+    const box = await requireBoundingBox(surface);
+    await surface.evaluate(
+        (element, payload) => {
+            const bytes = Uint8Array.from(atob(payload.base64), (char) => char.charCodeAt(0));
+            const dataTransfer = new DataTransfer();
+            payload.names.forEach((name) => dataTransfer.items.add(new File([bytes], name, { type: "image/webp" })));
+            element.dispatchEvent(new DragEvent("drop", { dataTransfer, clientX: payload.clientX, clientY: payload.clientY, bubbles: true, cancelable: true }));
+        },
+        { base64: fixture.toString("base64"), names, clientX: box.x + box.width / 2, clientY: box.y + box.height / 2 },
+    );
+}
+
+// 挂起站内媒体上传：按上传请求里的 originalName 分别放行，用来覆盖 A→B / B→A 的返回顺序，不依赖真实慢网络。
+async function holdCanvasUploads(page: Page, fixture: Buffer, names: string[]) {
+    const releases = new Map<string, () => Promise<void>>();
+    await page.route("**/api/reference-assets", async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        const body = route.request().postDataBuffer()?.toString("utf8") || "";
+        const name = names.find((item) => body.includes(item));
+        if (!name) return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "e2e 只放行本用例声明的文件" }) });
+        const token = `permanent/${name.replace(/\.webp$/, "")}.webp`;
+        releases.set(name, () => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ token, key: token, url: `/api/reference-assets/${token}`, bytes: fixture.length, mimeType: "image/webp" }) }));
+    });
+    await page.route("**/api/reference-assets/permanent/*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "image/webp", body: fixture });
+    });
+    return {
+        // 没有收到对应请求时直接失败，不静默跳过。
+        async release(name: string) {
+            await expect.poll(() => releases.has(name), { message: `${name} 的上传请求没有被挂起` }).toBe(true);
+            await releases.get(name)!();
+        },
+    };
 }
 
 // 只做浏览器层能做的事：合成 KeyboardEvent 携带 isComposing，返回该事件是否被应用 preventDefault。

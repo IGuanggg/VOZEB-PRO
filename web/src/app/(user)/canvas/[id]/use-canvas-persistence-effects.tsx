@@ -7,8 +7,8 @@ import { CanvasNodeType, isCanvasImageNodeType } from "../types";
 import { classifyCanvasVideoTaskFailure } from "./canvas-video-task-recovery";
 
 import { NODE_STATUS_ERROR, NODE_STATUS_LOADING } from "./canvas-page-elements";
-import { CANVAS_HISTORY_MERGE_WINDOW_MS, isSameCanvasHistoryEntry, isStructuralCanvasHistoryChange, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary } from "./canvas-history";
-import { buildGenerationConfig, hydrateAssistantImages, hydrateCanvasImages, isGenerationCanceled, normalizeCanvasConfigNodeLayout } from "./canvas-page-utils";
+import { CANVAS_HISTORY_MERGE_WINDOW_MS, isSameCanvasHistoryEntry, isStructuralCanvasHistoryChange, planCanvasHistoryCommit, settleCanvasHistoryUploads, transitionCanvasHistory, type CanvasHistoryBoundary } from "./canvas-history";
+import { buildGenerationConfig, hydrateAssistantImages, hydrateCanvasImages, isCanvasUploading, isGenerationCanceled, normalizeCanvasConfigNodeLayout } from "./canvas-page-utils";
 import { pauseCanvasGenerationReview } from "./canvas-generation-review";
 
 import type { CanvasPageState } from "./use-canvas-page-state";
@@ -332,6 +332,11 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
         const previousBoundary = historyBoundaryRef.current;
         historyBoundaryRef.current = boundary;
         const current = createHistoryEntry();
+        // 一次导入只占一步历史：异步回填写回发起导入的那一步（HEAD 与已入栈快照），
+        // 回填因此不新增撤销步，也不会把没有内存任务的“上传中”留在历史里。
+        const settled = settleCanvasHistoryUploads(historyRef.current, lastHistoryRef.current, current, isCanvasUploading);
+        historyRef.current = settled.timeline;
+        lastHistoryRef.current = settled.head;
         const head = lastHistoryRef.current;
         const plan = head && !applyingHistoryRef.current ? planCanvasHistoryCommit(previousBoundary, boundary, { changed: !isSameCanvasHistoryEntry(head, current), structural: isStructuralCanvasHistoryChange(head, current) }) : "hold";
 
