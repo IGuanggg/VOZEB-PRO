@@ -370,6 +370,23 @@ export function CanvasSurface({
         [onDragStateChange, setSelection],
     );
 
+    // 文字节点正文区域点击只切换选中态，不启动拖动，保证选字和光标定位可用。
+    const handleNodeActivate = useCallback(
+        (event: CanvasPointerEvent, nodeId: string) => {
+            const additive = event.shiftKey || event.ctrlKey || event.metaKey;
+            const nextSelection = new Set(selectedNodeIdsRef.current);
+            if (additive) {
+                if (nextSelection.has(nodeId)) nextSelection.delete(nodeId);
+                else nextSelection.add(nodeId);
+            } else if (!nextSelection.has(nodeId)) {
+                nextSelection.clear();
+                nextSelection.add(nodeId);
+            }
+            setSelection(nextSelection, null);
+        },
+        [setSelection],
+    );
+
     const handlePointerDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
             const target = event.target instanceof Element ? event.target : null;
@@ -746,6 +763,7 @@ export function CanvasSurface({
                                 renderPanel={renderPanel}
                                 renderNodeContent={renderNode}
                                 onMouseDown={handleNodeMouseDown}
+                                onActivateNode={handleNodeActivate}
                                 onConnectStart={handleConnectStart}
                                 onResize={previewNodeResize}
                                 onResizeEnd={commitNodeResize}

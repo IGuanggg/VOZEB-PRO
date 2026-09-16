@@ -27,7 +27,8 @@ export function isCanvasImageNodeType(type: CanvasNodeType | null | undefined) {
     return type === CanvasNodeType.Image || type === CanvasNodeType.Panorama;
 }
 
-type CanvasNodeStatus = "idle" | "success" | "loading" | "error" | "needs_review" | "cancelled";
+// "uploading" 是文件上传占位节点专用状态：上传中与 AI 生成中（"loading"）是两条互不相干的状态链。
+type CanvasNodeStatus = "idle" | "success" | "loading" | "uploading" | "error" | "needs_review" | "cancelled";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
@@ -104,9 +105,12 @@ export type CanvasNodeMetadata = {
     };
     content?: string;
     composerContent?: string;
+    promptDraft?: string;
     prompt?: string;
     sourcePrompt?: string;
     status?: CanvasNodeStatus;
+    // 上传失败（而不是生成失败）的占位节点标记：失败后仍停留在同一个节点上等待重试上传。
+    uploadFailed?: boolean;
     errorDetails?: string;
     fontSize?: number;
     configDetailsOpen?: boolean;

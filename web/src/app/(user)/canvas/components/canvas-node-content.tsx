@@ -10,6 +10,7 @@ import { imagePreviewUrl } from "@/lib/media-image-url";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
 import { CanvasPanoramaViewer } from "./canvas-panorama-viewer";
+import { canvasUploadPreviewUrl } from "../[id]/canvas-page-utils";
 import { CanvasNodeType, type CanvasNodeData } from "../types";
 import type { CanvasResourceReference } from "../utils/canvas-resource-references";
 
@@ -26,6 +27,7 @@ export type NodeContentRendererProps = {
     batchRecovering: boolean;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
     onContentChange: (nodeId: string, content: string) => void;
+    onActivateNode?: (event: React.MouseEvent | React.PointerEvent, nodeId: string) => void;
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
@@ -38,6 +40,7 @@ export type NodeContentRendererProps = {
 export function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.Config && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.isBatchRoot) return <ImageNodeContent {...props} />;
+    if (props.node.metadata?.status === "uploading") return <UploadingContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
     if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
     if (props.node.metadata?.status === "needs_review") return <ReviewContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
@@ -163,6 +166,39 @@ export function BrandKitNodeContent({ node, theme }: NodeContentRendererProps) {
     );
 }
 
+// 上传占位专用渲染：上传是单次请求、拿不到真实百分比，所以只做不定进度转圈，不写假百分比，也不复用“生成中”。
+export function UploadingContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
+    // 只有图片能直接用 blob 预览当缩略图；视频与音频用图标占位，避免出现破图。
+    const previewUrl = node.type === CanvasNodeType.Image ? canvasUploadPreviewUrl(node.id) : "";
+    const MediaIcon = node.type === CanvasNodeType.Video ? Video : node.type === CanvasNodeType.Audio ? Music2 : null;
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-3 overflow-hidden px-5 py-4 text-center" style={{ color: theme.node.text }}>
+            {previewUrl ? <img src={previewUrl} alt={node.title} draggable={false} className="max-h-[52%] max-w-full rounded-xl object-contain opacity-70" /> : null}
+            {MediaIcon ? <MediaIcon className="size-7 opacity-35" /> : null}
+            <div className="flex min-w-0 max-w-full items-center gap-2 text-xs" style={{ color: theme.node.muted }}>
+                <span className="size-3.5 shrink-0 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} aria-hidden="true" />
+                <span className="truncate">{node.title}</span>
+                <span className="shrink-0">上传中</span>
+            </div>
+            <button
+                type="button"
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition hover:brightness-95"
+                style={{ background: theme.node.subtleSurface, borderColor: theme.node.subtleBorder, color: theme.node.subtleText }}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    // 上传占位节点的操作由画布页面统一分派：上传中=取消，上传失败=重试。
+                    onRetry?.(node);
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+            >
+                <CircleX className="size-3.5" />
+                取消
+            </button>
+        </div>
+    );
+}
+
 export function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
@@ -236,7 +272,7 @@ export function UnknownNodeContent({ theme }: Pick<NodeContentRendererProps, "th
     );
 }
 
-export function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
+export function TextContent({ node, theme, textareaRef, mentionReferences, onContentChange, onActivateNode, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
 
@@ -258,28 +294,30 @@ export function TextContent({ node, theme, isEditingContent, textareaRef, mentio
                 <ImageIcon className="size-3.5" />
                 生图
             </button>
-            {isEditingContent ? (
-                <CanvasResourceMentionTextarea
-                    ref={textareaRef}
-                    className="thin-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent pl-4 pr-14 pt-0 pb-4 m-0 font-mono outline-none select-text appearance-none"
-                    style={textStyle}
-                    value={node.metadata?.content || ""}
-                    references={mentionReferences}
-                    highlightLabels={false}
-                    onChange={(value) => onContentChange(node.id, value)}
-                    onBlur={onStopEditing}
-                    onKeyDown={(event) => {
-                        if (event.key === "Escape") onStopEditing();
-                    }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onWheel={(event) => event.stopPropagation()}
-                />
-            ) : (
-                <div className="thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-14 pt-0 pb-4 font-mono" style={textStyle} onWheel={(event) => event.stopPropagation()}>
-                    {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>点击编辑文字</span>}
-                </div>
-            )}
+            <CanvasResourceMentionTextarea
+                ref={textareaRef}
+                className="thin-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent pl-4 pr-14 pt-0 pb-4 m-0 font-mono outline-none select-text appearance-none"
+                style={textStyle}
+                value={node.metadata?.content || ""}
+                placeholder="点击编辑文字"
+                references={mentionReferences}
+                highlightLabels={false}
+                onChange={(value) => onContentChange(node.id, value)}
+                onBlur={onStopEditing}
+                onKeyDown={(event) => {
+                    if (event.key === "Escape") onStopEditing();
+                }}
+                onMouseDown={(event) => {
+                    // 正文区域是编辑区：只切换选中态，不启动节点拖动，浏览器自行定位光标。
+                    onActivateNode?.(event, node.id);
+                    event.stopPropagation();
+                }}
+                onPointerDown={(event) => {
+                    onActivateNode?.(event, node.id);
+                    event.stopPropagation();
+                }}
+                onWheel={(event) => event.stopPropagation()}
+            />
         </div>
     );
 }

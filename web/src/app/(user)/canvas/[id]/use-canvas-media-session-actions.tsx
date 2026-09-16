@@ -11,8 +11,8 @@ import { CanvasNodeType, type CanvasAssistantSession, type Position } from "../t
 import { fitNodeSize } from "../utils/canvas-node-size";
 import { PANORAMA_IMAGE_SIZE, isPanoramaRatio } from "../utils/canvas-panorama";
 
-import { CANVAS_DROP_NODE_OFFSET, VIDEO_NODE_MAX_HEIGHT, VIDEO_NODE_MAX_WIDTH } from "./canvas-page-elements";
-import { audioMetadata, imageMetadata, isAudioFile, replaceCanvasNodeMediaMetadata, uploadCanvasImage, videoMetadata } from "./canvas-page-utils";
+import { VIDEO_NODE_MAX_HEIGHT, VIDEO_NODE_MAX_WIDTH } from "./canvas-page-elements";
+import { audioMetadata, canvasUploadPositions, imageMetadata, isAudioFile, isGenerationCanceled, replaceCanvasNodeMediaMetadata, uploadCanvasImage, videoMetadata } from "./canvas-page-utils";
 
 import type { CanvasInteractions } from "./use-canvas-interactions";
 import type { CanvasPageState } from "./use-canvas-page-state";
@@ -143,6 +143,7 @@ export function useCanvasMediaSessionActions({ state, interactions, files }: { s
                     await (isAudioFile(file) ? createAudioFileNode(file, position) : file.type.startsWith("video/") ? createVideoFileNode(file, position) : createImageFileNode(file, position));
                 }
             } catch (error) {
+                if (isGenerationCanceled(error)) return; // 用户主动取消上传时不再报错
                 message.error(error instanceof Error ? error.message : "文件添加失败，请稍后重试");
             } finally {
                 uploadTargetRef.current = null;
@@ -161,12 +162,14 @@ export function useCanvasMediaSessionActions({ state, interactions, files }: { s
             const pos = screenToCanvas(event.clientX, event.clientY);
             setSelectedNodeIds(new Set());
             setSelectedConnectionId(null);
+            // 多文件落点与顺序在导入开始时一次算好，与各文件的网络返回顺序无关。
+            const positions = canvasUploadPositions(pos, files.length);
             const creations = files.map((file, index) => {
-                const nextPos = { x: pos.x + index * CANVAS_DROP_NODE_OFFSET, y: pos.y + index * CANVAS_DROP_NODE_OFFSET };
+                const nextPos = positions[index];
                 return isAudioFile(file) ? createAudioFileNode(file, nextPos, true) : file.type.startsWith("video/") ? createVideoFileNode(file, nextPos, true, false) : createImageFileNode(file, nextPos, true, false);
             });
             void Promise.allSettled(creations).then((results) => {
-                const failures = results.filter((result) => result.status === "rejected");
+                const failures = results.filter((result) => result.status === "rejected" && !isGenerationCanceled(result.reason));
                 if (failures.length) message.error(failures.length === files.length ? "文件添加失败" : `有 ${failures.length} 个文件添加失败`);
             });
         },

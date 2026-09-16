@@ -4,9 +4,9 @@ import { getServerMediaBlob, parseServerMediaUrl, serverMediaUrl, uploadServerMe
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number; remoteUrl?: string; serverUrl?: string };
 
-export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
+export async function uploadMediaFile(input: string | Blob, prefix = "file", signal?: AbortSignal): Promise<UploadedFile> {
     const type = mediaType(input, prefix);
-    const stored = await uploadServerMedia(input, type);
+    const stored = await uploadServerMedia(input, type, undefined, signal);
     return withMediaMeta(stored, type);
 }
 

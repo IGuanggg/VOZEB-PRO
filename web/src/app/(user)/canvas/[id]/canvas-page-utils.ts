@@ -6,14 +6,17 @@ import { resolveImageUrl, resolveStoredImageDataUrl, uploadImage, type UploadedI
 import { resolveMediaUrl, type UploadedFile } from "@/services/file-storage";
 import { defaultConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
-import { CANVAS_CONFIG_NODE_HEIGHT, NODE_DEFAULT_SIZE } from "../constants";
+import { CANVAS_CONFIG_NODE_HEIGHT, NODE_DEFAULT_SIZE, getNodeSpec } from "../constants";
 import type { CanvasImageAngleParams } from "../components/canvas-node-angle-dialog";
 import type { NodeGenerationInput } from "../components/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "../components/canvas-node-prompt-panel";
 import { resolveCanvasGenerationModel } from "../utils/canvas-node-config";
-import { nodeSizeFromRatio, resizeImageNodeToNaturalRatio } from "../utils/canvas-node-size";
+import { fitNodeSize, nodeSizeFromRatio, resizeImageNodeToNaturalRatio } from "../utils/canvas-node-size";
 import { PANORAMA_IMAGE_SIZE } from "../utils/canvas-panorama";
-import { CanvasNodeType, isCanvasImageNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type ConnectionHandle } from "../types";
+import { CanvasNodeType, isCanvasImageNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type ConnectionHandle, type Position } from "../types";
+import { CANVAS_DROP_NODE_OFFSET, NODE_STATUS_ERROR, VIDEO_NODE_MAX_HEIGHT, VIDEO_NODE_MAX_WIDTH } from "./canvas-page-elements";
+
+const NODE_CREATE_MAX_ATTEMPTS = 12;
 
 export function imageExtension(dataUrl: string) {
     return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
@@ -28,8 +31,8 @@ export function audioExtension(mimeType?: string) {
     return "mp3";
 }
 
-export async function uploadCanvasImage(input: string | Blob): Promise<UploadedImage> {
-    const image = await uploadImage(input);
+export async function uploadCanvasImage(input: string | Blob, signal?: AbortSignal): Promise<UploadedImage> {
+    const image = await uploadImage(input, signal);
     return { ...image, url: await resolveStoredImageDataUrl(image.storageKey, image.url) };
 }
 
@@ -100,6 +103,126 @@ export function videoMetadata(video: UploadedFile): CanvasNodeMetadata {
 
 export function audioMetadata(audio: UploadedFile): CanvasNodeMetadata {
     return { content: audio.url, storageKey: audio.storageKey, remoteUrl: audio.remoteUrl, serverUrl: audio.serverUrl, status: "success", bytes: audio.bytes, mimeType: audio.mimeType || "audio/mpeg", durationMs: audio.durationMs };
+}
+
+export type CanvasUploadKind = "image" | "video" | "audio";
+
+const CANVAS_UPLOAD_NODE_TYPE: Record<CanvasUploadKind, CanvasNodeType> = {
+    image: CanvasNodeType.Image,
+    video: CanvasNodeType.Video,
+    audio: CanvasNodeType.Audio,
+};
+
+// 刷新或撤销之后页面内存里的原始 File 已不可得：只能提示重新选择文件，不能假装能恢复上传。
+export const CANVAS_UPLOAD_RESTART_HINT = "原文件已不在页面内存中，请重新选择文件上传";
+
+// 多文件导入的落点与顺序在导入开始时一次算好，后续只按序号原位填充，不随网络返回顺序改变。
+export function canvasUploadPositions(center: Position, count: number): Position[] {
+    return Array.from({ length: count }, (_, index) => ({ x: center.x + index * CANVAS_DROP_NODE_OFFSET, y: center.y + index * CANVAS_DROP_NODE_OFFSET }));
+}
+
+export function isCanvasUploadFile(kind: CanvasUploadKind, file: File) {
+    if (!file.size) return false;
+    return kind === "audio" ? isAudioFile(file) : file.type.startsWith(`${kind}/`);
+}
+
+// 上传占位节点是专有上传状态：不带生成任务句柄，也不带 blob:/data: 预览地址（metadata 会整体持久化到服务端）。
+export function canvasUploadPlaceholderNode(kind: CanvasUploadKind, id: string, file: File, position: Position): CanvasNodeData {
+    const spec = NODE_DEFAULT_SIZE[CANVAS_UPLOAD_NODE_TYPE[kind]];
+    return {
+        id,
+        type: CANVAS_UPLOAD_NODE_TYPE[kind],
+        title: file.name,
+        position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
+        width: spec.width,
+        height: spec.height,
+        metadata: { status: "uploading" },
+    };
+}
+
+export function isCanvasUploadPlaceholder(node: CanvasNodeData | undefined) {
+    return Boolean(node && (node.metadata?.status === "uploading" || node.metadata?.uploadFailed));
+}
+
+// 上传成功后原位填充同一个节点：保持中心点、换成服务端媒体 metadata，不新建节点。
+export function canvasUploadFillPatch(node: CanvasNodeData, kind: CanvasUploadKind, media: UploadedImage | UploadedFile): Partial<CanvasNodeData> {
+    const metadata = kind === "image" ? imageMetadata(media as UploadedImage) : kind === "video" ? videoMetadata(media) : audioMetadata(media);
+    const spec = NODE_DEFAULT_SIZE[CANVAS_UPLOAD_NODE_TYPE[kind]];
+    const naturalWidth = metadata.naturalWidth || (kind === "video" ? 1280 : spec.width);
+    const naturalHeight = metadata.naturalHeight || (kind === "video" ? 720 : spec.height);
+    const size = kind === "audio" ? spec : kind === "video" ? fitNodeSize(naturalWidth, naturalHeight, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT) : fitNodeSize(naturalWidth, naturalHeight);
+    return { width: size.width, height: size.height, position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 }, metadata };
+}
+
+// 迟到回调保护：节点已被删除、撤销、换过媒体或已切换项目时返回原数组，绝不复活节点，也不写进其他项目。
+export function updateCanvasUploadNode(nodes: CanvasNodeData[], projectId: string, activeProjectId: string, nodeId: string, patch: (node: CanvasNodeData) => Partial<CanvasNodeData>): CanvasNodeData[] {
+    const target = projectId === activeProjectId ? nodes.find((node) => node.id === nodeId) : undefined;
+    if (!isCanvasUploadPlaceholder(target)) return nodes;
+    return nodes.map((node) => (node.id === nodeId ? { ...node, ...patch(node) } : node));
+}
+
+export type CanvasUploadTask = {
+    projectId: string;
+    nodeId: string;
+    kind: CanvasUploadKind;
+    file: File;
+    previewUrl: string;
+    controller: AbortController;
+};
+
+// 原始 File 与 blob 预览只放在页面内存 Map（按节点 id）：节点 metadata 会持久化到服务端，不能带这些临时内容。
+const canvasUploadTasks = new Map<string, CanvasUploadTask>();
+
+export function renewCanvasUploadPreview(task: CanvasUploadTask) {
+    if (task.previewUrl) URL.revokeObjectURL(task.previewUrl);
+    task.previewUrl = URL.createObjectURL(task.file);
+}
+
+export function beginCanvasUploadTask(projectId: string, nodeId: string, kind: CanvasUploadKind, file: File) {
+    const task: CanvasUploadTask = { projectId, nodeId, kind, file, previewUrl: "", controller: new AbortController() };
+    renewCanvasUploadPreview(task);
+    canvasUploadTasks.set(nodeId, task);
+    return task;
+}
+
+export function readCanvasUploadTask(nodeId: string) {
+    return canvasUploadTasks.get(nodeId);
+}
+
+export function canvasUploadPreviewUrl(nodeId: string) {
+    return canvasUploadTasks.get(nodeId)?.previewUrl || "";
+}
+
+export function releaseCanvasUploadPreview(task: CanvasUploadTask) {
+    if (!task.previewUrl) return;
+    URL.revokeObjectURL(task.previewUrl);
+    task.previewUrl = "";
+}
+
+export function endCanvasUploadTask(nodeId: string) {
+    const task = canvasUploadTasks.get(nodeId);
+    if (!task) return;
+    releaseCanvasUploadPreview(task);
+    canvasUploadTasks.delete(nodeId);
+}
+
+export function cancelCanvasUploadTask(nodeId: string) {
+    const task = canvasUploadTasks.get(nodeId);
+    if (!task) return false;
+    task.controller.abort();
+    endCanvasUploadTask(nodeId);
+    return true;
+}
+
+export function listCanvasUploadTasks() {
+    return [...canvasUploadTasks.values()];
+}
+
+export function clearCanvasUploadTasks() {
+    listCanvasUploadTasks().forEach((task) => {
+        task.controller.abort();
+        endCanvasUploadTask(task.nodeId);
+    });
 }
 
 export function replaceCanvasNodeMediaMetadata(current: CanvasNodeMetadata | undefined, media: CanvasNodeMetadata, patch: CanvasNodeMetadata = {}): CanvasNodeMetadata {
@@ -195,6 +318,8 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
 }
 
 async function hydrateCanvasNode(node: CanvasNodeData) {
+    // 从服务端恢复出来的上传占位节点已经没有原始 File，只能标成可重试的错误并提示重新选择文件。
+    if (node.metadata?.status === "uploading") return { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, uploadFailed: true, errorDetails: CANVAS_UPLOAD_RESTART_HINT } };
     const content = node.metadata?.content;
     const fallbackContent = generatedContentFallback(content, node.metadata?.remoteUrl, node.metadata?.serverUrl);
     if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, fallbackContent) } };
@@ -253,6 +378,22 @@ export async function hydrateAssistantImages(sessions: CanvasAssistantSession[])
 export function getGenerationCount(count: string) {
     const value = Math.floor(Number(count));
     return Number.isSafeInteger(value) && value > 0 ? value : 1;
+}
+
+// 连续在空白处新建时按固定步长阶梯偏移，避免节点完全堆在同一点；用户指定位置时不调用。
+export function findFreeNodePosition(nodes: CanvasNodeData[], center: Position, type: CanvasNodeType): Position {
+    const spec = getNodeSpec(type);
+    for (let index = 0; index < NODE_CREATE_MAX_ATTEMPTS; index += 1) {
+        const position = { x: center.x + index * CANVAS_DROP_NODE_OFFSET, y: center.y + index * CANVAS_DROP_NODE_OFFSET };
+        if (!nodes.some((node) => coversPosition(node, position, spec))) return position;
+    }
+    return center;
+}
+
+function coversPosition(node: CanvasNodeData, center: Position, spec: { width: number; height: number }) {
+    const left = center.x - spec.width / 2;
+    const top = center.y - spec.height / 2;
+    return node.position.x <= left && node.position.y <= top && node.position.x + node.width >= left + spec.width && node.position.y + node.height >= top + spec.height;
 }
 
 export function applyNodeConfigPatch(node: CanvasNodeData, patch: Partial<CanvasNodeData["metadata"]>) {

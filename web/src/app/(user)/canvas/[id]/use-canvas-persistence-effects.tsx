@@ -7,6 +7,7 @@ import { CanvasNodeType, isCanvasImageNodeType } from "../types";
 import { classifyCanvasVideoTaskFailure } from "./canvas-video-task-recovery";
 
 import { NODE_STATUS_ERROR, NODE_STATUS_LOADING } from "./canvas-page-elements";
+import { CANVAS_HISTORY_MERGE_WINDOW_MS, isSameCanvasHistoryEntry, planCanvasHistoryCommit, transitionCanvasHistory, type CanvasHistoryBoundary } from "./canvas-history";
 import { buildGenerationConfig, hydrateAssistantImages, hydrateCanvasImages, isGenerationCanceled, normalizeCanvasConfigNodeLayout } from "./canvas-page-utils";
 import { pauseCanvasGenerationReview } from "./canvas-generation-review";
 
@@ -15,6 +16,8 @@ import type { CanvasTaskRuntime } from "./use-canvas-task-runtime";
 
 export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPageState; tasks: CanvasTaskRuntime }) {
     const skipInitialProjectSyncRef = useRef(false);
+    // 上一次的语义操作边界：拖动中 / 正在编辑的文本节点
+    const historyBoundaryRef = useRef<CanvasHistoryBoundary>({ dragging: false, editingNodeId: null });
     const {
         message,
         modal,
@@ -178,10 +181,6 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
                 setViewport(project.viewport);
                 didInitialCenterRef.current = Boolean(restoredNodes.length || project.connections.length || project.viewport.x || project.viewport.y || project.viewport.k !== 1 || project.createdAt !== project.updatedAt);
                 historyRef.current = { past: [], future: [] };
-                if (historyCommitTimerRef.current) {
-                    clearTimeout(historyCommitTimerRef.current);
-                    historyCommitTimerRef.current = null;
-                }
                 lastHistoryRef.current = {
                     nodes: restoredNodes,
                     connections: project.connections,
@@ -205,7 +204,7 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
     }, [hydrated, hydratedUserId, loadProject, message, projectId, router, userId]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || applyingHistoryRef.current) return; // 恢复历史快照时不重新轮询快照里的旧任务
         const resumable = nodes.filter((node) => isCanvasImageNodeType(node.type) && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.imageTask && !generationRequestsRef.current.has(node.id));
         resumable.forEach((node) => {
             const task = node.metadata?.imageTask;
@@ -234,7 +233,7 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
     }, [completeImageTask, effectiveConfig, finishGenerationRequest, message, nodes, projectLoaded, startGenerationRequest]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || applyingHistoryRef.current) return; // 恢复历史快照时不重新轮询快照里的旧任务
         const resumable = nodes.filter((node) => node.type === CanvasNodeType.Video && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.videoTask && !generationRequestsRef.current.has(node.id));
         resumable.forEach((node) => {
             const task = node.metadata?.videoTask;
@@ -270,7 +269,7 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
     }, [completeVideoTask, deferVideoTask, effectiveConfig, finishGenerationRequest, message, nodes, projectLoaded, startGenerationRequest]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || applyingHistoryRef.current) return; // 恢复历史快照时不重新轮询快照里的旧任务
         const resumable = nodes.filter((node) => node.type === CanvasNodeType.Text && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.textTask && !generationRequestsRef.current.has(node.id));
         resumable.forEach((node) => {
             const task = node.metadata?.textTask;
@@ -299,7 +298,7 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
     }, [completeTextTask, effectiveConfig, finishGenerationRequest, message, nodes, projectLoaded, startGenerationRequest]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || applyingHistoryRef.current) return; // 恢复历史快照时不重新轮询快照里的旧任务
         const resumable = nodes.filter((node) => node.type === CanvasNodeType.Audio && node.metadata?.status === NODE_STATUS_LOADING && node.metadata.audioTask && !generationRequestsRef.current.has(node.id));
         resumable.forEach((node) => {
             const task = node.metadata?.audioTask;
@@ -328,30 +327,38 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
     }, [completeAudioTask, effectiveConfig, finishGenerationRequest, message, nodes, projectLoaded, startGenerationRequest]);
 
     useEffect(() => {
-        if (!projectLoaded || applyingHistoryRef.current) return;
-        const next = createHistoryEntry();
-        const previous = lastHistoryRef.current;
-        if (
-            previous?.nodes === next.nodes &&
-            previous.connections === next.connections &&
-            previous.chatSessions === next.chatSessions &&
-            previous.activeChatId === next.activeChatId &&
-            previous.backgroundMode === next.backgroundMode &&
-            previous.showImageInfo === next.showImageInfo
-        )
-            return;
+        if (!projectLoaded) return;
+        const boundary = { dragging: isNodeDragging, editingNodeId };
+        const previousBoundary = historyBoundaryRef.current;
+        historyBoundaryRef.current = boundary;
+        const current = createHistoryEntry();
+        const head = lastHistoryRef.current;
+        const plan = head && !applyingHistoryRef.current ? planCanvasHistoryCommit(previousBoundary, boundary, !isSameCanvasHistoryEntry(head, current)) : "hold";
 
-        if (historyCommitTimerRef.current) clearTimeout(historyCommitTimerRef.current);
-        historyCommitTimerRef.current = setTimeout(() => {
-            const current = createHistoryEntry();
-            const last = lastHistoryRef.current;
-            if (!last) return;
-            historyRef.current.past = [...historyRef.current.past.slice(-49), last];
-            historyRef.current.future = [];
-            setHistoryState({ canUndo: true, canRedo: false });
-            lastHistoryRef.current = current;
-            historyCommitTimerRef.current = null;
-        }, 180);
+        if (plan === "flush" && head) {
+            // 语义边界（拖动开始/结束、文本编辑会话开始/切换/结束）立即提交，拖动不按帧、文本编辑不按停顿拆步
+            const transition = transitionCanvasHistory(historyRef.current, head, current, "commit");
+            if (transition) {
+                historyRef.current = transition.timeline;
+                lastHistoryRef.current = transition.head;
+            }
+        } else if (plan === "schedule") {
+            // 离散操作（增删节点、连线、批量导入…）沿用原有 180ms 合并窗口，各自成为一步历史。
+            // 回调里重新读取实时状态，迟到的提交不会把过期快照写回历史。
+            historyCommitTimerRef.current = setTimeout(() => {
+                historyCommitTimerRef.current = null;
+                const transition = transitionCanvasHistory(historyRef.current, lastHistoryRef.current, createHistoryEntry(), "commit");
+                if (!transition) return;
+                historyRef.current = transition.timeline;
+                lastHistoryRef.current = transition.head;
+                setHistoryState({ canUndo: true, canRedo: false });
+            }, CANVAS_HISTORY_MERGE_WINDOW_MS);
+        }
+
+        setHistoryState((prev) => {
+            const next = { canUndo: !isSameCanvasHistoryEntry(lastHistoryRef.current, current) || historyRef.current.past.length > 0, canRedo: historyRef.current.future.length > 0 };
+            return prev.canUndo === next.canUndo && prev.canRedo === next.canRedo ? prev : next;
+        });
 
         return () => {
             if (historyCommitTimerRef.current) {
@@ -359,7 +366,7 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
                 historyCommitTimerRef.current = null;
             }
         };
-    }, [activeChatId, backgroundMode, chatSessions, connections, createHistoryEntry, nodes, projectLoaded, showImageInfo]);
+    }, [activeChatId, backgroundMode, chatSessions, connections, createHistoryEntry, editingNodeId, isNodeDragging, nodes, projectLoaded, showImageInfo]);
 
     useEffect(
         () => () => {

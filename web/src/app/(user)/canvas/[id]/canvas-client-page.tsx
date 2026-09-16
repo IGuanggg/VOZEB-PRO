@@ -221,6 +221,7 @@ function VozebProCanvasPage() {
         createVideoFileNode,
         createAudioFileNode,
         createTextNodeFromClipboard,
+        handleCanvasUploadNode,
         handleImageDimensions,
         toggleNodeFreeResize,
         handleNodeContentChange,
@@ -323,7 +324,10 @@ function VozebProCanvasPage() {
                         onContentChange: handleNodeContentChange,
                         onToggleBatch: toggleBatchExpanded,
                         onSetBatchPrimary: setBatchPrimary,
-                        onRetry: (node) => void handleRetryNode(node),
+                        onRetry: (node) => {
+                            // 上传占位节点先走上传链（上传中=取消，上传失败=重试同一节点），其余节点才走生成重试。
+                            if (!handleCanvasUploadNode(node)) void handleRetryNode(node);
+                        },
                         onGenerateImage: generateImageFromTextNode,
                         onOpenPanel: (node) => {
                             setSelectedNodeIds(new Set([node.id]));
@@ -479,7 +483,9 @@ function VozebProCanvasPage() {
                     onAngle={(node) => setAngleNodeId(node.id)}
                     onViewImage={(node) => setPreviewNodeId(node.id)}
                     onReversePrompt={createImageReversePromptNodes}
-                    onRetry={(node) => void handleRetryNode(node)}
+                    onRetry={(node) => {
+                        if (!handleCanvasUploadNode(node)) void handleRetryNode(node);
+                    }}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />

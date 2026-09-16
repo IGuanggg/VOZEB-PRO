@@ -46,6 +46,7 @@ export type CanvasNodeProps = {
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onResizeEnd?: (nodeId: string, width: number, height: number, position?: Position) => void;
     onContentChange: (nodeId: string, content: string) => void;
+    onActivateNode?: (event: React.MouseEvent | React.PointerEvent, nodeId: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
     onRetry?: (node: CanvasNodeData) => void;
@@ -106,6 +107,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onResize,
     onResizeEnd,
     onContentChange,
+    onActivateNode,
     onToggleBatch,
     onSetBatchPrimary,
     onRetry,
@@ -155,15 +157,15 @@ export const CanvasNode = React.memo(function CanvasNode({
     }, [data.type, isEditingContent]);
 
     useEffect(() => {
-        if (!isEditingContent) return;
-        const textarea = textareaRef.current;
-        textarea?.focus();
-        textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
-    }, [isEditingContent]);
-
-    useEffect(() => {
         if (!editRequestNonce || data.type !== CanvasNodeType.Text) return;
         setIsEditingContent(true);
+        // 只有新建或显式请求编辑时才把光标放到末尾；点击已有正文由浏览器保留点击位置。
+        const frame = requestAnimationFrame(() => {
+            const textarea = textareaRef.current;
+            textarea?.focus();
+            textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
+        });
+        return () => cancelAnimationFrame(frame);
     }, [data.type, editRequestNonce]);
 
     useEffect(() => {
@@ -384,6 +386,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         renderNodeContent={renderNodeContent}
                         mentionReferences={mentionReferences}
                         onContentChange={onContentChange}
+                        onActivateNode={onActivateNode}
                         onStopEditing={() => setIsEditingContent(false)}
                         onRetry={onRetry}
                         onGenerateImage={onGenerateImage}

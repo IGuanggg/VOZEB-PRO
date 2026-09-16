@@ -45,7 +45,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const hasImageContent = isCanvasImageNodeType(node.type) && Boolean(node.metadata?.content);
     const isPanorama = node.type === CanvasNodeType.Panorama;
     const isEditingExistingContent = hasTextContent || hasImageContent;
-    const [prompt, setPrompt] = useState(isEditingExistingContent ? "" : node.metadata?.prompt || "");
+    const [prompt, setPrompt] = useState(nodeStoredDraft(node));
     const [expanded, setExpanded] = useState(false);
     const expandedEditorRef = useRef<HTMLTextAreaElement | null>(null);
     const credits = requestCreditCost({
@@ -61,19 +61,19 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     });
 
     useEffect(() => {
-        setPrompt(isEditingExistingContent ? "" : node.metadata?.prompt || "");
-    }, [isEditingExistingContent, node.id]);
+        setPrompt(nodeStoredDraft(node));
+    }, [node.id]);
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
-        if (!isEditingExistingContent) onPromptChange(node.id, value);
+        if (isEditingExistingContent) onConfigChange(node.id, { promptDraft: value });
+        else onPromptChange(node.id, value);
     };
 
     const submit = () => {
         const text = prompt.trim();
         if (!text || isRunning) return false;
         onGenerate(node.id, mode, text);
-        setPrompt("");
         return true;
     };
 
@@ -256,6 +256,12 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
 function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
     return type === CanvasNodeType.Text ? "text" : type === CanvasNodeType.Video ? "video" : type === CanvasNodeType.Audio ? "audio" : "image";
+}
+
+export function nodeStoredDraft(node: CanvasNodeData) {
+    if (typeof node.metadata?.promptDraft === "string") return node.metadata.promptDraft;
+    const hasExistingContent = (node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim())) || (isCanvasImageNodeType(node.type) && Boolean(node.metadata?.content));
+    return hasExistingContent ? "" : node.metadata?.prompt || "";
 }
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {

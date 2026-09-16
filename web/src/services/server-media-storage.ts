@@ -12,11 +12,11 @@ const SERVER_MEDIA_ROUTES = [
     { prefix: "/api/reference-assets/", scope: "reference" as const },
 ];
 
-export async function uploadServerMedia(input: string | Blob, type: ServerMediaType, maxBytes = CREATIVE_UPLOAD_MAX_BYTES): Promise<StoredServerMedia> {
+export async function uploadServerMedia(input: string | Blob, type: ServerMediaType, maxBytes = CREATIVE_UPLOAD_MAX_BYTES, signal?: AbortSignal): Promise<StoredServerMedia> {
     const existing = typeof input === "string" ? parseServerMediaUrl(input) : null;
     if (existing?.storageKey.startsWith("permanent/")) return readExistingServerMedia(existing, type);
 
-    const blob = typeof input === "string" ? await fetchMediaBlob(input) : input;
+    const blob = typeof input === "string" ? await fetchMediaBlob(input, signal) : input;
     const originalName = input instanceof File ? input.name.trim() : "";
     if (!blob.size) throw new Error("上传文件为空");
     if (blob.size > maxBytes) throw new Error(maxBytes === CREATIVE_UPLOAD_MAX_BYTES ? "单个文件不能超过 20MB" : "生成媒体文件过大");
@@ -26,6 +26,7 @@ export async function uploadServerMedia(input: string | Blob, type: ServerMediaT
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, persistent: true, dataUrl: await blobToDataUrl(blob), originalName: originalName || undefined }),
+        signal,
     });
     const payload = (await response.json().catch(() => ({}))) as { error?: string; url?: string; token?: string; key?: string; bytes?: number; mimeType?: string };
     if (!response.ok || !payload.token) throw new Error(payload.error || "文件保存到服务器失败");
@@ -98,9 +99,9 @@ export function blobToDataUrl(blob: Blob) {
     });
 }
 
-async function fetchMediaBlob(url: string) {
+async function fetchMediaBlob(url: string, signal?: AbortSignal) {
     if (url.startsWith("data:")) return dataUrlToBlob(url);
-    const response = await fetch(browserReadableMediaUrl(url), { cache: "no-store" });
+    const response = await fetch(browserReadableMediaUrl(url), { cache: "no-store", signal });
     if (!response.ok) throw new Error("读取媒体失败");
     return response.blob();
 }

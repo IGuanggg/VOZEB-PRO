@@ -7,7 +7,8 @@ import { CanvasNodeType, type CanvasNodeData, type Position } from "../types";
 import { resizeImageNodeToNaturalRatio } from "../utils/canvas-node-size";
 
 import { createCanvasNode } from "./canvas-page-elements";
-import { getGenerationCount } from "./canvas-page-utils";
+import { createCanvasNodeClipboard, createPastedCanvasNodes, type CanvasNodeClipboardPayload } from "./canvas-node-clipboard";
+import { findFreeNodePosition, getGenerationCount } from "./canvas-page-utils";
 
 import type { CanvasPageState } from "./use-canvas-page-state";
 
@@ -34,6 +35,7 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
         setToolbarNodeId,
         setDialogNodeId,
         setEditingNodeId,
+        setEditRequestNonce,
         setInfoNodeId,
         setCropNodeId,
         setMaskEditNodeId,
@@ -47,7 +49,7 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
 
     const createNode = useCallback(
         (type: CanvasNodeType, position?: Position) => {
-            const targetPosition = position || getCanvasCenter();
+            const targetPosition = position || findFreeNodePosition(nodesRef.current, getCanvasCenter(), type);
             const configMetadata =
                 type === CanvasNodeType.Config
                     ? {
@@ -61,7 +63,13 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
             setNodes((prev) => [...prev, newNode]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
-            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio) setDialogNodeId(newNode.id);
+            if (type === CanvasNodeType.Text) {
+                // 新建文字节点直接进入编辑态，DOM 挂载完成后由 editRequestNonce 聚焦。
+                setEditingNodeId(newNode.id);
+                setEditRequestNonce((value) => value + 1);
+            } else if (type !== CanvasNodeType.Audio) {
+                setDialogNodeId(newNode.id);
+            }
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
     );
@@ -172,79 +180,28 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
     }, []);
 
     const copySelectedNodes = useCallback(() => {
-        const selectedIds = selectedNodeIdsRef.current;
-        if (!selectedIds.size) return;
-
-        const copiedNodes = nodesRef.current
-            .filter((node) => selectedIds.has(node.id))
-            .map((node) => ({
-                ...node,
-                position: { ...node.position },
-                metadata: node.metadata ? { ...node.metadata } : undefined,
-            }));
-
-        if (!copiedNodes.length) return;
-
-        clipboardRef.current = {
-            nodes: copiedNodes,
-            connections: connectionsRef.current.filter((connection) => selectedIds.has(connection.fromNodeId) && selectedIds.has(connection.toNodeId)).map((connection) => ({ ...connection })),
-        };
+        const payload = createCanvasNodeClipboard(nodesRef.current, connectionsRef.current, selectedNodeIdsRef.current);
+        if (!payload) return null;
+        clipboardRef.current = payload;
+        return payload;
     }, []);
 
-    const pasteCopiedNodes = useCallback(() => {
-        const clipboard = clipboardRef.current;
-        if (!clipboard?.nodes.length) return false;
+    const pasteCopiedNodes = useCallback(
+        (payload: CanvasNodeClipboardPayload) => {
+            if (!payload.nodes.length) return false;
 
-        const center = getCanvasCenter();
-        const bounds = clipboard.nodes.reduce(
-            (acc, node) => ({
-                left: Math.min(acc.left, node.position.x),
-                top: Math.min(acc.top, node.position.y),
-                right: Math.max(acc.right, node.position.x + node.width),
-                bottom: Math.max(acc.bottom, node.position.y + node.height),
-            }),
-            { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity },
-        );
-        const dx = center.x - (bounds.left + bounds.right) / 2;
-        const dy = center.y - (bounds.top + bounds.bottom) / 2;
-        const idMap = new Map<string, string>();
-        const nextNodes = clipboard.nodes.map((node) => {
-            const id = `${node.type}-${nanoid()}`;
-            idMap.set(node.id, id);
-            return {
-                ...node,
-                id,
-                title: node.title.endsWith(" Copy") ? node.title : `${node.title} Copy`,
-                position: {
-                    x: node.position.x + dx,
-                    y: node.position.y + dy,
-                },
-                metadata: node.metadata ? { ...node.metadata } : undefined,
-            };
-        });
+            const pasted = createPastedCanvasNodes(payload, getCanvasCenter());
 
-        const nextConnections = clipboard.connections.flatMap((connection) => {
-            const fromNodeId = idMap.get(connection.fromNodeId);
-            const toNodeId = idMap.get(connection.toNodeId);
-            if (!fromNodeId || !toNodeId) return [];
-            return [
-                {
-                    ...connection,
-                    id: `conn-${nanoid()}`,
-                    fromNodeId,
-                    toNodeId,
-                },
-            ];
-        });
-
-        setNodes((prev) => [...prev, ...nextNodes]);
-        setConnections((prev) => [...prev, ...nextConnections]);
-        setSelectedNodeIds(new Set(nextNodes.map((node) => node.id)));
-        setSelectedConnectionId(null);
-        setContextMenu(null);
-        setDialogNodeId(nextNodes[0]?.id || null);
-        return true;
-    }, [getCanvasCenter]);
+            setNodes((prev) => [...prev, ...pasted.nodes]);
+            setConnections((prev) => [...prev, ...pasted.connections]);
+            setSelectedNodeIds(new Set(pasted.nodes.map((node) => node.id)));
+            setSelectedConnectionId(null);
+            setContextMenu(null);
+            setDialogNodeId(pasted.nodes[0]?.id || null);
+            return true;
+        },
+        [getCanvasCenter],
+    );
     return {
         createNode,
         deleteNodes,

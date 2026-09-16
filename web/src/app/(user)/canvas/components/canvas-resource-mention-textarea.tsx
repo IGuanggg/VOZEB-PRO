@@ -9,7 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { imagePreviewUrl } from "@/lib/media-image-url";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "../utils/canvas-resource-references";
-import { handleMentionNavigation } from "../utils/canvas-mention-navigation";
+import { handleMentionTextareaKeyDown } from "../utils/canvas-mention-navigation";
 
 type MentionState = {
     start: number;
@@ -32,6 +32,8 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const overlayRef = useRef<HTMLDivElement | null>(null);
+    const composingRef = useRef(false);
+    const imeCommitRef = useRef(false);
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [hasSelection, setHasSelection] = useState(false);
@@ -68,6 +70,13 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     const closeMention = () => {
         setMention(null);
         setActiveIndex(0);
+    };
+
+    // 部分浏览器的输入法确认键会在 compositionend 之后才派发 keydown，吞掉这一次 Enter/Escape，避免中文未打完就提交或退出编辑。
+    const consumeImeCommitKey = (key: string) => {
+        if (!imeCommitRef.current || (key !== "Enter" && key !== "Escape")) return false;
+        imeCommitRef.current = false;
+        return true;
     };
 
     const syncMention = (nextValue: string, cursor: number) => {
@@ -144,11 +153,14 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     props.onSelect?.(event);
                 }}
                 onFocus={(event) => {
+                    composingRef.current = false;
+                    imeCommitRef.current = false;
                     setFocused(true);
                     updateSelectionState();
                     props.onFocus?.(event);
                 }}
                 onKeyUp={(event) => {
+                    imeCommitRef.current = false;
                     updateSelectionState();
                     props.onKeyUp?.(event);
                 }}
@@ -157,25 +169,38 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     props.onPointerUp?.(event);
                 }}
                 onKeyDown={(event) => {
-                    if (mention && handleMentionNavigation(event, candidates, activeIndex, setActiveIndex, insertReference, closeMention)) return;
-                    if (event.key === "Enter" && onSubmit && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
-                        event.preventDefault();
-                        onSubmit();
-                        return;
-                    }
+                    if (composingRef.current || consumeImeCommitKey(event.key)) return;
+                    if (handleMentionTextareaKeyDown(event, { mentionActive: Boolean(mention), candidates, activeIndex, setActiveIndex, onSelect: insertReference, onClose: closeMention, onSubmit })) return;
                     onKeyDown?.(event);
+                }}
+                onCompositionStart={(event) => {
+                    composingRef.current = true;
+                    imeCommitRef.current = false;
+                    props.onCompositionStart?.(event);
+                }}
+                onCompositionEnd={(event) => {
+                    composingRef.current = false;
+                    imeCommitRef.current = true;
+                    props.onCompositionEnd?.(event);
                 }}
                 onScroll={(event) => {
                     syncOverlayScroll();
                     props.onScroll?.(event);
                 }}
                 onBlur={(event) => {
+                    composingRef.current = false;
+                    imeCommitRef.current = false;
                     setFocused(false);
                     setHasSelection(false);
                     window.setTimeout(closeMention, 120);
                     props.onBlur?.(event);
                 }}
             />
+            {onSubmit ? (
+                <div className="pointer-events-none absolute bottom-1 right-2 z-10 rounded px-1 text-[11px] leading-4" style={{ background: theme.node.fill, color: theme.node.muted }}>
+                    Enter 提交 · Shift+Enter 换行
+                </div>
+            ) : null}
             {menu}
         </div>
     );

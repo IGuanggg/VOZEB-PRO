@@ -15,8 +15,8 @@ export type UploadedImage = {
     mimeType: string;
 };
 
-export async function uploadImage(input: string | Blob): Promise<UploadedImage> {
-    const stored = await uploadServerMedia(input, "image");
+export async function uploadImage(input: string | Blob, signal?: AbortSignal): Promise<UploadedImage> {
+    const stored = await uploadServerMedia(input, "image", undefined, signal);
     const meta = await readImageMeta(stored.url);
     return { ...stored, serverUrl: stored.url, width: meta.width, height: meta.height, mimeType: stored.mimeType || meta.mimeType };
 }

@@ -6,6 +6,7 @@ import { resolveSiteTitle } from "@/lib/site-brand";
 import { usePublicSessionStore } from "@/stores/use-public-session-store";
 import { useCanvasStore } from "../stores/use-canvas-store";
 
+import { transitionCanvasHistory } from "./canvas-history";
 import { CanvasHistoryEntry } from "./canvas-page-elements";
 
 import type { CanvasPageState } from "./use-canvas-page-state";
@@ -41,6 +42,7 @@ export function useCanvasNavigationActions({ state }: { state: CanvasPageState }
         setShowImageInfo,
         setHistoryState,
         nodesRef,
+        connectionsRef,
         viewportRef,
     } = state;
 
@@ -73,12 +75,16 @@ export function useCanvasNavigationActions({ state }: { state: CanvasPageState }
         [size.height, size.width],
     );
 
+    const readCurrentEntry = useCallback((): CanvasHistoryEntry => ({ nodes: nodesRef.current, connections: connectionsRef.current, chatSessions, activeChatId, backgroundMode, showImageInfo }), [activeChatId, backgroundMode, chatSessions, showImageInfo]);
+
     const applyHistory = useCallback((entry: CanvasHistoryEntry) => {
         if (historyCommitTimerRef.current) {
             clearTimeout(historyCommitTimerRef.current);
             historyCommitTimerRef.current = null;
         }
         applyingHistoryRef.current = true;
+        // HEAD 与即将恢复的快照同步对齐，恢复出来的屏幕状态不会再被当成一次新的未提交编辑
+        lastHistoryRef.current = entry;
         setNodes(entry.nodes);
         setConnections(entry.connections);
         setChatSessions(entry.chatSessions);
@@ -89,27 +95,27 @@ export function useCanvasNavigationActions({ state }: { state: CanvasPageState }
         setSelectedConnectionId(null);
         setContextMenu(null);
         setTimeout(() => {
-            lastHistoryRef.current = entry;
             applyingHistoryRef.current = false;
             setHistoryState({ canUndo: historyRef.current.past.length > 0, canRedo: historyRef.current.future.length > 0 });
         });
     }, []);
 
-    const undoCanvas = useCallback(() => {
-        const previous = historyRef.current.past.pop();
-        const current = lastHistoryRef.current;
-        if (!previous || !current) return;
-        historyRef.current.future.push(current);
-        applyHistory(previous);
-    }, [applyHistory]);
+    // 撤销/重做先把屏幕上还没提交的变化按语义边界提交进历史，再退回直接前态或前进到 future 顶
+    const applyHistoryAction = useCallback(
+        (action: "undo" | "redo") => {
+            const transition = transitionCanvasHistory(historyRef.current, lastHistoryRef.current, readCurrentEntry(), action);
+            if (!transition) return;
+            historyRef.current = transition.timeline;
+            lastHistoryRef.current = transition.head;
+            setHistoryState({ canUndo: transition.timeline.past.length > 0, canRedo: transition.timeline.future.length > 0 });
+            if (transition.entry) applyHistory(transition.entry);
+        },
+        [applyHistory, readCurrentEntry],
+    );
 
-    const redoCanvas = useCallback(() => {
-        const next = historyRef.current.future.pop();
-        const current = lastHistoryRef.current;
-        if (!next || !current) return;
-        historyRef.current.past.push(current);
-        applyHistory(next);
-    }, [applyHistory]);
+    const undoCanvas = useCallback(() => applyHistoryAction("undo"), [applyHistoryAction]);
+
+    const redoCanvas = useCallback(() => applyHistoryAction("redo"), [applyHistoryAction]);
 
     const createAndOpenProject = useCallback(async () => {
         try {
