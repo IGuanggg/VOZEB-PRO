@@ -48,6 +48,9 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [prompt, setPrompt] = useState(nodeStoredDraft(node));
     const [expanded, setExpanded] = useState(false);
     const expandedEditorRef = useRef<HTMLTextAreaElement | null>(null);
+    // 记录面板最后一次写给节点的草稿值，用于区分「自己输入的回环」与「外部有效更新」。
+    // 撤销/重做恢复的是同一个节点的 metadata，node.id 不变，所以不能只依赖 id 变化来同步。
+    const lastWrittenDraftRef = useRef(nodeStoredDraft(node));
     const credits = requestCreditCost({
         apiSource: config.apiSource,
         modelPointCosts: config.modelPointCosts,
@@ -60,11 +63,22 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         videoSeconds: config.videoSeconds,
     });
 
+    const storedDraft = nodeStoredDraft(node);
+    const nodeIdRef = useRef(node.id);
     useEffect(() => {
-        setPrompt(nodeStoredDraft(node));
-    }, [node.id]);
+        const switchedNode = nodeIdRef.current !== node.id;
+        nodeIdRef.current = node.id;
+        // 切换节点：无条件采用该节点自己的草稿（包含空字符串语义）。
+        // 同一节点：只有节点上的草稿与面板最后一次写出的值不一致时才同步，
+        // 这样撤销/重做恢复的历史值会刷新普通与放大输入框，
+        // 而用户正在键入时的正常回环（值相同）不会重置输入、更不会把光标顶回末尾。
+        if (!switchedNode && storedDraft === lastWrittenDraftRef.current) return;
+        lastWrittenDraftRef.current = storedDraft;
+        setPrompt(storedDraft);
+    }, [node.id, storedDraft]);
 
     const updatePrompt = (value: string) => {
+        lastWrittenDraftRef.current = value;
         setPrompt(value);
         if (isEditingExistingContent) onConfigChange(node.id, { promptDraft: value });
         else onPromptChange(node.id, value);

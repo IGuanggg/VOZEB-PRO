@@ -21,8 +21,15 @@ type CanvasNodeSeed = {
     metadata: Record<string, unknown>;
 };
 
-// 站内静态资源，不依赖外网；带 naturalWidth/Height 让水合时不必再探测图片尺寸。
+// 站内静态资源，不依赖外网。logo.svg 没有 width/height 属性，浏览器把它的内在尺寸解析成 150x150；
+// 这里声明 240x180 只是为了让整例水合时不必探测尺寸。凡是要断言历史步数的用例请改用
+// STABLE_IMAGE_METADATA：声明值与浏览器上报值不一致会让图片加载后回填 metadata，多出一步历史。
 const IMAGE_METADATA = { content: "/logo.svg", naturalWidth: 240, naturalHeight: 180 };
+
+// 需要几何与元数据都完全静止的用例（撤销/重做步数断言）：logo.svg 没有 width/height 属性，
+// 浏览器把它的内在尺寸解析成 150x150，这里必须声明同一个值。声明成别的尺寸会让图片加载后的
+// 真实尺寸回填写入 metadata，凭空多出一步与用户操作无关的历史；节点也用方形，避免比例自适应。
+const STABLE_IMAGE_METADATA = { content: "/logo.svg", naturalWidth: 150, naturalHeight: 150 };
 
 // 项目标题会出现在顶栏标题按钮的可访问名里，所以测试标题只用 ASCII，避免撞上界面文案。
 function projectTitle(scope: string) {
@@ -590,6 +597,87 @@ test("R1 点击已有文字正文编辑后直接新建图片，撤销只退回�
         await expect(page.locator(`[data-node-id="${imageId}"]`)).toHaveCount(0);
         await expect(page.locator('[data-node-id="text-edit-existing"]')).toHaveCount(1);
         await expect(textarea).toHaveValue(edited);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R5a 撤销草稿后，面板保持打开也要显示并提交撤销后的文本", async ({ page, request }) => {
+    // R5 回归：面板把草稿同时存在本地 state 与节点 metadata，同步 effect 原先只依赖 node.id。
+    // 撤销恢复的是同一个节点的 promptDraft（id 不变），面板不会同步，输入框与提交值仍是撤销前的文本。
+    // 这里不关闭面板、不切换节点，验证同 ID 的历史恢复能刷新普通输入框。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R5 draft undo sync"),
+        viewport: { x: 100, y: 110, k: 1 },
+        nodes: [node("draft-sync-a", "image", 60, 120, 240, 240, { ...STABLE_IMAGE_METADATA, promptDraft: "草稿A" })],
+        connections: [],
+    });
+    const projectPath = `/api/canvas/projects/${project.id}`;
+    const draftB = "草稿B：把背景换成夜色";
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodeA = page.locator('[data-node-id="draft-sync-a"]');
+        const promptBox = page.getByRole("textbox", { name: "节点提示词" });
+
+        // 打开面板：显示已保存的草稿 A。
+        await clickCanvasNode(nodeA);
+        await expect(promptBox).toBeVisible();
+        await expect(promptBox).toHaveValue("草稿A");
+
+        // 在同一面板里改成 B 并等待服务端保存。
+        await promptBox.fill(draftB);
+        await expectCanvasSaved(page);
+        await expect.poll(async () => readCanvasNodeMetadata(request, projectPath, "draft-sync-a")).toMatchObject({ promptDraft: draftB });
+
+        // 面板保持打开，焦点移回画布后撤销。改了草稿就只应该产生一步历史，
+        // 因此一次撤销必须直接回到草稿 A。
+        await focusCanvasSurface(page, surface);
+        await page.locator('[aria-label="撤销"]').click();
+        await expect
+            .poll(async () => ((await readCanvasNodeMetadata(request, projectPath, "draft-sync-a")) as { promptDraft?: string } | null)?.promptDraft ?? "", { timeout: 4_000, intervals: [300] })
+            .toBe("草稿A");
+
+        // 回到 A 后，面板显示的必须是 A；重做应回到 B 且显示同步。
+        await expect(promptBox).toHaveValue("草稿A");
+        await page.locator('[aria-label="重做"]').click();
+        await expect(promptBox).toHaveValue(draftB);
+        await expect.poll(async () => readCanvasNodeMetadata(request, projectPath, "draft-sync-a")).toMatchObject({ promptDraft: draftB });
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R5b 撤销草稿后放大编辑器也显示撤销后的文本", async ({ page, request }) => {
+    // R5 的另一半验收：普通输入与放大输入必须一致，历史恢复要同时刷新两处。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R5 expanded editor sync"),
+        viewport: { x: 100, y: 110, k: 1 },
+        nodes: [node("draft-expanded-a", "image", 60, 120, 240, 240, { ...STABLE_IMAGE_METADATA, promptDraft: "放大前草稿A" })],
+        connections: [],
+    });
+    const draftB = "放大前草稿B";
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodeA = page.locator('[data-node-id="draft-expanded-a"]');
+        const promptBox = page.getByRole("textbox", { name: "节点提示词" });
+
+        await clickCanvasNode(nodeA);
+        await expect(promptBox).toHaveValue("放大前草稿A");
+        await promptBox.fill(draftB);
+        await expectCanvasSaved(page);
+
+        // 面板保持打开，撤销到 A。
+        await focusCanvasSurface(page, surface);
+        await page.keyboard.press("Control+z");
+        await expect(promptBox).toHaveValue("放大前草稿A");
+
+        // 现在打开放大编辑器：它必须拿到撤销后的值，而不是撤销前的 B。
+        await page.getByRole("button", { name: "放大提示词输入" }).click();
+        const dialog = page.getByRole("dialog", { name: "编辑提示词" });
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole("textbox", { name: "提示词编辑器" })).toHaveValue("放大前草稿A");
     } finally {
         await deleteCanvasProject(request, project.id);
     }
