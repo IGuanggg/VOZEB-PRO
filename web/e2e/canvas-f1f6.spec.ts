@@ -501,6 +501,100 @@ test("F6 图片导入立即出现上传占位节点并原位填充", async ({ pa
     }
 });
 
+test("R1 新建文字节点输入正文后直接点工具栏新建两张图片，各自一步撤销且正文保留", async ({ page, request }) => {
+    // R1 回归：新建文字节点会把页面级 editingNodeId 设成该节点。正文失焦若只改组件内的
+    // isEditingContent、不同步清理页面状态，历史规划器就一直 hold，把“正文输入 + 两张新增图片”
+    // 并成同一步撤销（一次撤销三个节点一起退回）。
+    //
+    // 关键：这里绝不点击画布空白。点空白会走 onPaneClick -> deselectCanvas，而 deselectCanvas
+    // 本来就带 setEditingNodeId(null)，会顺手把状态清干净、反而掩盖缺陷（这正是第一版测试
+    // 在未修复代码上也能通过的原因）。真实用户路径是编辑完直接点工具栏新建。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R1 text edit boundary"),
+        viewport: { x: 0, y: 0, k: 1 },
+        nodes: [],
+        connections: [],
+    });
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodes = page.locator("[data-node-id]");
+
+        // 新建文字节点（自动聚焦）并键入正文。
+        await page.getByRole("button", ADD_TEXT_BUTTON).click();
+        const textId = await expectNewCanvasNode(page, []);
+        const textarea = page.locator(`[data-node-id="${textId}"] ${TEXT_NODE_CONTENT}`);
+        await expect.poll(() => textarea.evaluate((element) => document.activeElement === element)).toBe(true);
+        const body = "用户刚输入的正文";
+        await page.keyboard.type(body);
+        await expect(textarea).toHaveValue(body);
+
+        // 焦点仍在正文里，直接点两次工具栏新建图片：不经过 deselectCanvas。
+        await page.getByRole("button", { name: "图片", exact: true }).click();
+        const firstImage = await expectNewCanvasNode(page, [textId]);
+        await page.getByRole("button", { name: "图片", exact: true }).click();
+        const secondImage = await expectNewCanvasNode(page, [textId, firstImage]);
+        await expect(nodes).toHaveCount(3);
+
+        // 把焦点移出可编辑元素，让 Ctrl+Z 走画布历史而不是浏览器原生文本撤销。
+        await focusCanvasSurface(page, surface);
+
+        // 第一次撤销：只去掉第二张图片，第一张图片与文字节点都还在。
+        await page.keyboard.press("Control+z");
+        await expect(page.locator(`[data-node-id="${secondImage}"]`)).toHaveCount(0);
+        await expect(page.locator(`[data-node-id="${firstImage}"]`)).toHaveCount(1);
+        await expect(page.locator(`[data-node-id="${textId}"]`)).toHaveCount(1);
+
+        // 第二次撤销：只去掉第一张图片，正文不能被一起撤回。
+        await page.keyboard.press("Control+z");
+        await expect(page.locator(`[data-node-id="${firstImage}"]`)).toHaveCount(0);
+        await expect(page.locator(`[data-node-id="${textId}"]`)).toHaveCount(1);
+        await expect(textarea).toHaveValue(body);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R1 点击已有文字正文编辑后直接新建图片，撤销只退回图片", async ({ page, request }) => {
+    // R1 的另一条路径：点击已有正文进入编辑同样要建立页面级编辑会话，之后直接新建图片
+    // 也必须各自一步撤销（同样不点空白，避免 deselectCanvas 掩盖缺陷）。
+    const content = "已有文字节点的正文内容";
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R1 click existing text"),
+        viewport: { x: 80, y: 80, k: 1 },
+        nodes: [node("text-edit-existing", "text", 80, 140, 320, 200, { content })],
+        connections: [],
+    });
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const textarea = page.locator(`[data-node-id="text-edit-existing"] ${TEXT_NODE_CONTENT}`);
+        await expect(textarea).toHaveValue(content);
+
+        // 点击正文把光标放进句中并插入一个字符。
+        await textarea.click({ position: { x: 60, y: 12 } });
+        await page.keyboard.type("改");
+        const edited = await textarea.inputValue();
+        expect(edited).toContain("改");
+        expect(edited).not.toBe(content);
+
+        // 直接在正文仍处于编辑态时新建一张图片。
+        await page.getByRole("button", { name: "图片", exact: true }).click();
+        const imageId = await expectNewCanvasNode(page, ["text-edit-existing"]);
+
+        // 焦点在工具栏按钮上时 Ctrl+Z 会被当编辑框操作忽略，先回到画布表面。
+        await focusCanvasSurface(page, surface);
+
+        // 撤销：只应退回这张图片，正文修改必须保留。
+        await page.keyboard.press("Control+z");
+        await expect(page.locator(`[data-node-id="${imageId}"]`)).toHaveCount(0);
+        await expect(page.locator('[data-node-id="text-edit-existing"]')).toHaveCount(1);
+        await expect(textarea).toHaveValue(edited);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
 function node(id: string, type: string, x: number, y: number, width: number, height: number, metadata: Record<string, unknown>): CanvasNodeSeed {
     return { id, type, title: id, position: { x, y }, width, height, metadata };
 }

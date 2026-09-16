@@ -29,6 +29,9 @@ export type NodeContentRendererProps = {
     onContentChange: (nodeId: string, content: string) => void;
     onActivateNode?: (event: React.MouseEvent | React.PointerEvent, nodeId: string) => void;
     onStopEditing: () => void;
+    // 正文获得焦点即代表进入编辑会话。textarea 的 pointerdown/mousedown 会 stopPropagation，
+    // 点击已有正文到不了节点外层 div，所以这里用 focus 作为唯一可靠的入口。
+    onStartEditing?: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
@@ -272,7 +275,7 @@ export function UnknownNodeContent({ theme }: Pick<NodeContentRendererProps, "th
     );
 }
 
-export function TextContent({ node, theme, textareaRef, mentionReferences, onContentChange, onActivateNode, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
+export function TextContent({ node, theme, textareaRef, mentionReferences, onContentChange, onActivateNode, onStopEditing, onStartEditing, onGenerateImage }: NodeContentRendererProps) {
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
 
@@ -303,6 +306,7 @@ export function TextContent({ node, theme, textareaRef, mentionReferences, onCon
                 references={mentionReferences}
                 highlightLabels={false}
                 onChange={(value) => onContentChange(node.id, value)}
+                onFocus={onStartEditing}
                 onBlur={onStopEditing}
                 onKeyDown={(event) => {
                     if (event.key === "Escape") onStopEditing();

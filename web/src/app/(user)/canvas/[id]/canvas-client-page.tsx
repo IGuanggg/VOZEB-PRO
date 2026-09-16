@@ -322,6 +322,10 @@ function VozebProCanvasPage() {
                             hideNodeToolbar();
                         },
                         onContentChange: handleNodeContentChange,
+                        // 正文编辑会话必须同步到页面状态：进入时登记，退出（失焦/Escape/点走）时清理。
+                        // 遗留的 editingNodeId 会让历史规划器一直 hold，把后续新建/导入合并进同一步撤销。
+                        onTextEditStart: (nodeId) => setEditingNodeId(nodeId),
+                        onTextEditEnd: (nodeId) => setEditingNodeId((current) => (current === nodeId ? null : current)),
                         onToggleBatch: toggleBatchExpanded,
                         onSetBatchPrimary: setBatchPrimary,
                         onRetry: (node) => {

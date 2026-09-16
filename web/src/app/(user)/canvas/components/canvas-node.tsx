@@ -47,6 +47,10 @@ export type CanvasNodeProps = {
     onResizeEnd?: (nodeId: string, width: number, height: number, position?: Position) => void;
     onContentChange: (nodeId: string, content: string) => void;
     onActivateNode?: (event: React.MouseEvent | React.PointerEvent, nodeId: string) => void;
+    // 页面级正文编辑会话：进入/退出正文编辑必须同步到页面状态，历史规划器据此划分语义边界。
+    // 只有正文编辑（新建聚焦、点击/双击已有正文、失焦、Escape、点走）触发；拖动与其它节点类型不触发。
+    onTextEditStart?: (nodeId: string) => void;
+    onTextEditEnd?: (nodeId: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
     onRetry?: (node: CanvasNodeData) => void;
@@ -108,6 +112,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     onResizeEnd,
     onContentChange,
     onActivateNode,
+    onTextEditStart,
+    onTextEditEnd,
     onToggleBatch,
     onSetBatchPrimary,
     onRetry,
@@ -147,6 +153,18 @@ export const CanvasNode = React.memo(function CanvasNode({
         currentPosition: { x: 0, y: 0 },
     });
 
+    // 正文编辑的进入/退出只有一个入口：本地 isEditingContent 与页面级编辑会话必须同时更新，
+    // 否则页面 editingNodeId 会被遗留，历史规划器长期 hold，后续结构变化被合并撤销。
+    const enterTextEditing = useCallback(() => {
+        setIsEditingContent(true);
+        onTextEditStart?.(data.id);
+    }, [data.id, onTextEditStart]);
+
+    const endTextEditing = useCallback(() => {
+        setIsEditingContent(false);
+        onTextEditEnd?.(data.id);
+    }, [data.id, onTextEditEnd]);
+
     useEffect(() => {
         const textarea = textareaRef.current;
         if (!textarea) return;
@@ -158,7 +176,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 
     useEffect(() => {
         if (!editRequestNonce || data.type !== CanvasNodeType.Text) return;
-        setIsEditingContent(true);
+        enterTextEditing();
         // 只有新建或显式请求编辑时才把光标放到末尾；点击已有正文由浏览器保留点击位置。
         const frame = requestAnimationFrame(() => {
             const textarea = textareaRef.current;
@@ -166,7 +184,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
         });
         return () => cancelAnimationFrame(frame);
-    }, [data.type, editRequestNonce]);
+    }, [data.type, editRequestNonce, enterTextEditing]);
 
     useEffect(() => {
         if (!isEditingContent) return;
@@ -176,12 +194,12 @@ export const CanvasNode = React.memo(function CanvasNode({
             if (!(target instanceof Node)) return;
             if (isEditingContent && textareaRef.current?.contains(target)) return;
 
-            setIsEditingContent(false);
+            endTextEditing();
         };
 
         window.addEventListener("pointerdown", handleOutsidePointerDown, true);
         return () => window.removeEventListener("pointerdown", handleOutsidePointerDown, true);
-    }, [isEditingContent]);
+    }, [isEditingContent, endTextEditing]);
 
     const handleResizeMove = useCallback(
         (event: MouseEvent) => {
@@ -273,7 +291,7 @@ export const CanvasNode = React.memo(function CanvasNode({
         }
         if (data.type === CanvasNodeType.Text) {
             event.stopPropagation();
-            setIsEditingContent(true);
+            enterTextEditing();
             return;
         }
         if (data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Panorama || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio || data.type === CanvasNodeType.Config) {
@@ -296,7 +314,7 @@ export const CanvasNode = React.memo(function CanvasNode({
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest("button,input,textarea,select,video,audio,[data-canvas-no-drag]")) return;
         if (data.type === CanvasNodeType.Text) {
-            setIsEditingContent(true);
+            enterTextEditing();
             return;
         }
         if (data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Panorama || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio || data.type === CanvasNodeType.Config) {
@@ -307,7 +325,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const activateTextEditorAfterClick = (event: React.MouseEvent | React.PointerEvent) => {
         if (data.type !== CanvasNodeType.Text || isInteractiveTarget(event.target)) return;
         const start = clickStartRef.current;
-        if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 6 && !event.shiftKey && !event.ctrlKey && !event.metaKey) setIsEditingContent(true);
+        if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 6 && !event.shiftKey && !event.ctrlKey && !event.metaKey) enterTextEditing();
     };
 
     useEffect(() => {
@@ -387,7 +405,8 @@ export const CanvasNode = React.memo(function CanvasNode({
                         mentionReferences={mentionReferences}
                         onContentChange={onContentChange}
                         onActivateNode={onActivateNode}
-                        onStopEditing={() => setIsEditingContent(false)}
+                        onStopEditing={endTextEditing}
+                        onStartEditing={enterTextEditing}
                         onRetry={onRetry}
                         onGenerateImage={onGenerateImage}
                         onImageDimensions={onImageDimensions}
