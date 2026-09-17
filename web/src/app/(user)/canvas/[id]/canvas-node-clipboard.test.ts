@@ -75,6 +75,27 @@ describe("节点剪贴板编解码", () => {
         expect(readCanvasNodeClipboardText(`vozeb-canvas-nodes:v1:{"version":1,"nodes":[],"connections":[]}`)).toBeNull();
     });
 
+    it("缺少后续必用字段的载荷被拒绝，不会在粘贴时抛未捕获异常", () => {
+        const missing = [
+            // 只有 id/type：贴上去会立刻读不存在的 position.x
+            `vozeb-canvas-nodes:v1:{"version":1,"nodes":[{"id":"x","type":"text"}]}`,
+            `vozeb-canvas-nodes:v1:{"version":1,"nodes":[{"id":"x","type":"text","title":"t","position":{},"width":1,"height":1}]}`,
+            `vozeb-canvas-nodes:v1:{"version":1,"nodes":[{"id":"x","type":"text","title":"t","position":{"x":0,"y":0}}]}`,
+            // 组内引用必须是字符串数组，否则重映射会抛错
+            `vozeb-canvas-nodes:v1:{"version":1,"nodes":[{"id":"x","type":"text","title":"t","position":{"x":0,"y":0},"width":1,"height":1,"metadata":{"batchChildIds":"nope"}}]}`,
+            // 连线缺一端：粘贴时会留下悬空边
+            `vozeb-canvas-nodes:v1:{"version":1,"nodes":[{"id":"x","type":"text","title":"t","position":{"x":0,"y":0},"width":1,"height":1}],"connections":[{"id":"c","fromNodeId":"x"}]}`,
+        ];
+
+        missing.forEach((text) => expect(readCanvasNodeClipboardText(text)).toBeNull());
+        // 外部普通文字仍然不被误认，正常载荷仍然可解析并粘贴。
+        expect(readCanvasNodeClipboardText(`vozeb-canvas-nodes:v1:{"version":1,"nodes":[{"id":"x","type":"text"}]} 后面的普通文字`)).toBeNull();
+        const payload = createCanvasNodeClipboard([imageNode(), textNode("text-b")], [connection], new Set(["image-a", "text-b"]));
+        const parsed = readCanvasNodeClipboardText(`vozeb-canvas-nodes:v1:${JSON.stringify(payload)}`);
+        expect(parsed).not.toBeNull();
+        expect(createPastedCanvasNodes(parsed!, { x: 0, y: 0 }).nodes).toHaveLength(2);
+    });
+
     it("没有选中节点时返回空，不写入剪贴板", () => {
         expect(createCanvasNodeClipboard([imageNode(), textNode("text-b")], [connection], new Set())).toBeNull();
     });

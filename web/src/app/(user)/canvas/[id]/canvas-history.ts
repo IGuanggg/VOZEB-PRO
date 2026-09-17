@@ -84,8 +84,9 @@ function isSameCanvasHistoryContent(previous: CanvasHistoryEntry, next: CanvasHi
 
 /**
  * 一次导入只占一步历史：异步回填（占位拿到成功结果或可重试的失败）并入发起导入的那一步。
- * - 回填结果同时写回 HEAD 与已入栈快照，撤销/重做恢复的是完成结果，而不是没有内存任务的“上传中”；
- * - HEAD 与屏幕只剩下节点数组实例的差别时直接对齐屏幕状态，回填因此不再新增撤销步；
+ * - 已入栈快照只吸收这次尝试的媒体字段：快照自己的位置、尺寸、标题与其他用户修改都保留，
+ *   否则回填会把用户后来的拖动/缩放写回过去，撤销拖动就失去原来的位置；
+ * - HEAD 与屏幕只剩下节点数组实例的区别时直接对齐屏幕状态，回填因此不再新增撤销步；
  * - 期间的用户编辑不在这里处理，仍由调用方按语义边界/合并窗口提交，不会被回填吞并。
  * `isUploading` 是调用方判定的“还在等结果”的占位节点谓词，历史层不引入上传语义。
  */
@@ -102,30 +103,32 @@ export function settleCanvasHistoryUploads(
     });
     if (!results.size) return { timeline, head };
 
-    const settle = (entry: CanvasHistoryEntry) => {
+    const settleEntry = (entry: CanvasHistoryEntry, live: boolean) => {
         let changed = false;
         const nodes = entry.nodes.map((node) => {
             const result = results.get(node.id);
             if (!result || result === node || !isUploading(node)) return node;
             changed = true;
-            return result;
+            // live 只用来判断“HEAD 是否已经等于屏幕状态”，真正写回历史的是只换 metadata 的版本。
+            return live ? result : { ...node, metadata: result.metadata };
         });
         return changed ? { ...entry, nodes } : entry;
     };
     const settleEntries = (entries: CanvasHistoryEntry[]) => {
         let changed = false;
         const next = entries.map((entry) => {
-            const settled = settle(entry);
+            const settled = settleEntry(entry, false);
             if (settled !== entry) changed = true;
             return settled;
         });
         return changed ? next : entries;
     };
 
-    const settledHead = head ? settle(head) : null;
+    const liveHead = head ? settleEntry(head, true) : null;
+    const settledHead = head ? settleEntry(head, false) : null;
     return {
         timeline: { past: settleEntries(timeline.past), future: settleEntries(timeline.future) },
-        head: settledHead && isSameCanvasHistoryContent(settledHead, current) ? current : settledHead,
+        head: liveHead && liveHead !== head && isSameCanvasHistoryContent(liveHead, current) ? current : settledHead,
     };
 }
 

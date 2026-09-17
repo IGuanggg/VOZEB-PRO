@@ -433,6 +433,34 @@ describe("Canvas history upload settle", () => {
         expect(hasUploadingSnapshot(redo!)).toBe(false);
     });
 
+    it("settles only the media fields so a dragged placeholder keeps its own history", () => {
+        vi.useFakeTimers();
+        const harness = createCommitHarness();
+        const placeholder = uploadNode("image-a"); // 占位节点在 x=0
+        const initial = uploadState([placeholder]);
+        const movedPlaceholder = { ...placeholder, position: { x: 200, y: 0 } };
+        const dragged = uploadState([movedPlaceholder]);
+        const finished = uploadState([{ ...movedPlaceholder, metadata: { status: "success", content: "/api/reference-assets/permanent/image-a.webp", storageKey: "permanent/image-a.webp" } }]);
+        harness.load(uploadState([]));
+
+        harness.change(initial); // 导入：一步
+        harness.change(initial, { dragging: true }); // 按下节点
+        harness.change(dragged, { dragging: true }); // 拖动中只累积
+        harness.change(dragged, { dragging: false }); // 松开：拖动成一步
+        expect(harness.timeline().past).toHaveLength(2);
+
+        harness.change(finished); // 上传成功：并入导入那一步，不新增撤销步也不改旧快照
+        vi.advanceTimersByTime(CANVAS_HISTORY_MERGE_WINDOW_MS * 3);
+        expect(harness.timeline().past).toHaveLength(2);
+
+        // 撤销拖动：位置回到 0，同时拿到这次上传的永久媒体结果。
+        const undo = harness.undo();
+        expect(undo?.nodes[0]?.position).toEqual({ x: 0, y: 0 });
+        expect(undo?.nodes[0]?.metadata?.storageKey).toBe("permanent/image-a.webp");
+        expect(undo?.nodes[0]?.metadata?.status).toBe("success");
+        expect(hasUploadingSnapshot(undo!)).toBe(false);
+    });
+
     it("does not swallow an independent text edit made while the import is still uploading", () => {
         vi.useFakeTimers();
         const harness = createCommitHarness();

@@ -55,11 +55,37 @@ function parseCanvasNodeClipboard(json: string): CanvasNodeClipboardPayload | nu
         const parsed = JSON.parse(json) as Partial<CanvasNodeClipboardPayload> | null;
         if (!parsed || typeof parsed !== "object" || parsed.version !== CLIPBOARD_VERSION) return null;
         if (!Array.isArray(parsed.nodes) || !parsed.nodes.length) return null;
-        if (!parsed.nodes.every((node) => typeof node?.id === "string" && typeof node?.type === "string")) return null;
-        return { version: parsed.version, nodes: parsed.nodes, connections: Array.isArray(parsed.connections) ? parsed.connections : [] };
+        // 识别成功之前必须验证粘贴会直接使用的每个字段：缺字段时宁可整份按不识别处理，
+        // 走普通文本回退，也不能半插入或在粘贴时抛未捕获异常。
+        if (!parsed.nodes.every(isClipboardNode)) return null;
+        const connections = Array.isArray(parsed.connections) ? parsed.connections : [];
+        if (!connections.every(isClipboardConnection)) return null;
+        return { version: parsed.version, nodes: parsed.nodes, connections };
     } catch {
         return null;
     }
+}
+
+/** 粘贴会直接用这些字段算边界、改标题并按 id 重映射组内引用。 */
+function isClipboardNode(value: unknown): value is CanvasNodeData {
+    if (!value || typeof value !== "object") return false;
+    const node = value as Partial<CanvasNodeData>;
+    if (typeof node.id !== "string" || typeof node.type !== "string" || typeof node.title !== "string") return false;
+    if (!Number.isFinite(node.position?.x) || !Number.isFinite(node.position?.y)) return false;
+    if (!Number.isFinite(node.width) || !Number.isFinite(node.height)) return false;
+    if (node.metadata !== undefined && (!node.metadata || typeof node.metadata !== "object")) return false;
+    return [node.metadata?.batchChildIds, node.metadata?.references, node.metadata?.brandKit?.approvedNodeIds, node.metadata?.brandKit?.rejectedNodeIds].every(isOptionalIdList);
+}
+
+function isOptionalIdList(value: unknown) {
+    return value === undefined || (Array.isArray(value) && value.every((id) => typeof id === "string"));
+}
+
+/** 连线两端都要能重映射到本次副本，缺一端就会留下悬空边。 */
+function isClipboardConnection(value: unknown): value is CanvasConnection {
+    if (!value || typeof value !== "object") return false;
+    const connection = value as Partial<CanvasConnection>;
+    return typeof connection.id === "string" && typeof connection.fromNodeId === "string" && typeof connection.toNodeId === "string";
 }
 
 export function createCanvasNodeClipboard(nodes: CanvasNodeData[], connections: CanvasConnection[], selectedIds: Set<string>): CanvasNodeClipboardPayload | null {

@@ -19,11 +19,14 @@ import {
     clearCanvasUploadTasks,
     endCanvasUploadTask,
     isCanvasUploadFile,
+    isCanvasUploadAttemptCurrent,
+    isCanvasUploadAttemptLive,
     isCanvasUploadPlaceholder,
     isGenerationCanceled,
     listCanvasUploadTasks,
     readCanvasUploadTask,
     releaseCanvasUploadPreview,
+    removeConnectionsForNodes,
     renewCanvasUploadPreview,
     updateCanvasUploadNode,
     uploadCanvasImage,
@@ -45,6 +48,7 @@ export function useCanvasFileActions({ state, interactions }: { state: CanvasPag
         projectId,
         nodes,
         setNodes,
+        setConnections,
         size,
         setSelectedNodeIds,
         selectedConnectionId,
@@ -70,21 +74,27 @@ export function useCanvasFileActions({ state, interactions }: { state: CanvasPag
     const runCanvasUpload = useCallback(
         async (task: CanvasUploadTask) => {
             task.controller = new AbortController();
+            // 每次尝试的不可变身份：取消、重试、换项目之后，旧尝试的成功/失败/清理一律失效。
+            const attempt = task.controller;
             const { nodeId, kind, file } = task;
-            setNodes((prev) => updateCanvasUploadNode(prev, task.projectId, projectIdRef.current, nodeId, () => ({ metadata: { status: "uploading" } })));
+            // 写回处校验“这次尝试仍然有效”：身份不可变、取消后一律失效；函数式 setNodes 会被延后执行，
+            // 因此不能在这里读登记表（成功路径的清理可能已经先跑完）。
+            const isLiveAttempt = () => isCanvasUploadAttemptLive(task, attempt);
+            setNodes((prev) => updateCanvasUploadNode(prev, task.projectId, projectIdRef.current, nodeId, () => ({ metadata: { status: "uploading" } }), isLiveAttempt));
             try {
-                const media = kind === "image" ? await uploadCanvasImage(file, task.controller.signal) : await uploadMediaFile(file, kind, task.controller.signal);
-                setNodes((prev) => updateCanvasUploadNode(prev, task.projectId, projectIdRef.current, nodeId, (node) => canvasUploadFillPatch(node, kind, media)));
+                const media = kind === "image" ? await uploadCanvasImage(file, attempt.signal) : await uploadMediaFile(file, kind, attempt.signal);
+                setNodes((prev) => updateCanvasUploadNode(prev, task.projectId, projectIdRef.current, nodeId, (node) => canvasUploadFillPatch(node, kind, media), isLiveAttempt));
             } catch (error) {
-                if (!isGenerationCanceled(error)) {
+                if (!isGenerationCanceled(error) && isLiveAttempt()) {
                     // 单项失败立刻在占位节点上标错并保留重试入口；原始 File 仍留在页面内存 Map 里供重试复用。
                     const errorDetails = `上传失败：${error instanceof Error ? error.message : "请稍后重试"}`;
-                    setNodes((prev) => updateCanvasUploadNode(prev, task.projectId, projectIdRef.current, nodeId, () => ({ metadata: { status: NODE_STATUS_ERROR, uploadFailed: true, errorDetails } })));
+                    setNodes((prev) => updateCanvasUploadNode(prev, task.projectId, projectIdRef.current, nodeId, () => ({ metadata: { status: NODE_STATUS_ERROR, uploadFailed: true, errorDetails } }), isLiveAttempt));
                     releaseCanvasUploadPreview(task);
                 }
                 throw error;
             }
-            endCanvasUploadTask(nodeId);
+            // 清理是同步副作用：额外确认登记表里仍是这次任务，旧尝试不会删掉同 ID 上的新尝试。
+            if (isCanvasUploadAttemptCurrent(task, attempt)) endCanvasUploadTask(nodeId);
         },
         [setNodes],
     );
@@ -131,16 +141,18 @@ export function useCanvasFileActions({ state, interactions }: { state: CanvasPag
         [getCanvasCenter],
     );
 
-    // 取消上传：abort 后在途回调不会再写回，占位节点与 blob 预览一起移除。
+    // 取消上传：abort 后在途回调不再写回，占位节点、关联连线、blob 预览与相关面板在同一个逻辑操作里移除。
     const cancelCanvasUpload = useCallback(
         (nodeId: string) => {
             if (!cancelCanvasUploadTask(nodeId)) return false;
             setNodes((prev) => prev.filter((node) => node.id !== nodeId));
+            // 与节点删除共用同一份图清理：任何一端不存在的连线都不留在项目状态里。
+            setConnections((prev) => removeConnectionsForNodes(prev, new Set([nodeId])));
             setSelectedNodeIds((current) => (current.has(nodeId) ? new Set([...current].filter((id) => id !== nodeId)) : current));
             setDialogNodeId((current) => (current === nodeId ? null : current));
             return true;
         },
-        [setDialogNodeId, setNodes, setSelectedNodeIds],
+        [setConnections, setDialogNodeId, setNodes, setSelectedNodeIds],
     );
 
     // 重试必须填回同一个节点：复用页面内存里的原始 File；刷新后 File 不可得，只能提示重新选择文件。

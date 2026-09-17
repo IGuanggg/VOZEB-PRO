@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button, Modal } from "antd";
 import { imagePreviewUrl } from "@/lib/media-image-url";
@@ -118,8 +118,8 @@ function VozebProCanvasPage() {
         setDialogNodeId,
         editingNodeId,
         setEditingNodeId,
-        editRequestNonce,
-        setEditRequestNonce,
+        textEditFocusRequest,
+        releaseTextEditFocus,
         infoNodeId,
         setInfoNodeId,
         cropNodeId,
@@ -259,6 +259,17 @@ function VozebProCanvasPage() {
         closeAgent,
     } = controller;
     const hiddenCanvasNodeIds = useMemo(() => new Set(nodes.filter((node) => isHiddenBatchChild(node, nodes, collapsingBatchIds)).map((node) => node.id)), [collapsingBatchIds, nodes]);
+    // 正文编辑会话的回调必须保持稳定身份：CanvasNode 的自动聚焦 effect 依赖它们，
+    // 每次渲染新建同样逻辑的函数会让 effect 在普通输入后重跑并把光标顶回末尾。
+    const handleTextEditStart = useCallback((nodeId: string) => setEditingNodeId(nodeId), [setEditingNodeId]);
+    const handleTextEditEnd = useCallback(
+        (nodeId: string) => {
+            setEditingNodeId((current) => (current === nodeId ? null : current));
+            // 会话结束即作废属于它的聚焦请求，节点重新挂载时不会重放旧命令。
+            releaseTextEditFocus(nodeId);
+        },
+        [releaseTextEditFocus, setEditingNodeId],
+    );
     if (!projectLoaded) return <CanvasRefreshShell />;
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.backdrop, color: theme.node.text }}>
@@ -324,8 +335,8 @@ function VozebProCanvasPage() {
                         onContentChange: handleNodeContentChange,
                         // 正文编辑会话必须同步到页面状态：进入时登记，退出（失焦/Escape/点走）时清理。
                         // 遗留的 editingNodeId 会让历史规划器一直 hold，把后续新建/导入合并进同一步撤销。
-                        onTextEditStart: (nodeId) => setEditingNodeId(nodeId),
-                        onTextEditEnd: (nodeId) => setEditingNodeId((current) => (current === nodeId ? null : current)),
+                        onTextEditStart: handleTextEditStart,
+                        onTextEditEnd: handleTextEditEnd,
                         onToggleBatch: toggleBatchExpanded,
                         onSetBatchPrimary: setBatchPrimary,
                         onRetry: (node) => {
@@ -342,7 +353,8 @@ function VozebProCanvasPage() {
                         onViewImage: (node) => setPreviewNodeId(node.id),
                     }}
                     getNodeViewProps={(node) => ({
-                        editRequestNonce: editingNodeId === node.id ? editRequestNonce : 0,
+                        // 显式聚焦请求只发给被请求的那个节点：其他节点拿到 0，不会复用上一个节点的旧命令。
+                        editRequestNonce: textEditFocusRequest?.nodeId === node.id ? textEditFocusRequest.nonce : 0,
                         showPanel: dialogNodeId === node.id,
                         batchCount: batchChildCountById.get(node.id) || 0,
                         batchExpanded: Boolean(node.metadata?.imageBatchExpanded),

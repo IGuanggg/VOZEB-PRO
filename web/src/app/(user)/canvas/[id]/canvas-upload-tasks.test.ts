@@ -9,12 +9,16 @@ import {
     canvasUploadPlaceholderNode,
     canvasUploadPositions,
     canvasUploadPreviewUrl,
+    cancelCanvasUploadTask,
     clearCanvasUploadTasks,
     endCanvasUploadTask,
     hydrateCanvasImages,
     isCanvasUploadFile,
+    isCanvasUploadAttemptCurrent,
+    isCanvasUploadAttemptLive,
     readCanvasUploadTask,
     releaseCanvasUploadPreview,
+    removeConnectionsForNodes,
     restoreCanvasUploadNodes,
     updateCanvasUploadNode,
 } from "./canvas-page-utils";
@@ -124,6 +128,71 @@ describe("画布上传占位节点", () => {
         const done = { ...settled, metadata: { status: "success" as const, content: "/api/reference-assets/permanent/done.webp" } };
         const untouched = [done];
         expect(restoreCanvasUploadNodes(untouched)).toBe(untouched);
+    });
+
+    it("取消后的迟到尝试写不进被恢复的同 ID 节点", () => {
+        const node = canvasUploadPlaceholderNode("image", "image-1", file("照片.png"), { x: 0, y: 0 });
+        const task = beginCanvasUploadTask(PROJECT, "image-1", "image", file("照片.png"));
+        const attempt = task.controller;
+        const fill = () => ({ metadata: { status: "success" as const, storageKey: "permanent/late.webp" } });
+
+        // 这次尝试仍然有效：允许写回（写回只看不可变的尝试身份与取消状态）。
+        expect(updateCanvasUploadNode([node], PROJECT, PROJECT, "image-1", fill, () => isCanvasUploadAttemptLive(task, attempt))[0]?.metadata?.storageKey).toBe("permanent/late.webp");
+
+        // 用户取消：abort 并从登记表移除，然后撤销把同 ID 占位恢复出来（没有内存任务 → 可重试错误态）。
+        expect(cancelCanvasUploadTask("image-1")).toBe(true);
+        expect(isCanvasUploadAttemptLive(task, attempt)).toBe(false);
+        expect(isCanvasUploadAttemptCurrent(task, attempt)).toBe(false);
+        const restored = restoreCanvasUploadNodes([node])[0]!;
+        expect(restored.metadata).toMatchObject({ status: "error", uploadFailed: true });
+
+        // 迟到成功：返回原数组，既不复活媒体，也不改回 success。
+        const afterLate = updateCanvasUploadNode([restored], PROJECT, PROJECT, "image-1", fill, () => isCanvasUploadAttemptLive(task, attempt));
+        expect(afterLate[0]).toBe(restored);
+        expect(afterLate[0]?.metadata?.status).toBe("error");
+        expect(afterLate[0]?.metadata?.storageKey).toBeUndefined();
+    });
+
+    it("新重试先完成时旧尝试一律失效，清理也不按 nodeId 误删新任务", () => {
+        const node = canvasUploadPlaceholderNode("image", "image-2", file("照片.png"), { x: 0, y: 0 });
+        const task = beginCanvasUploadTask(PROJECT, "image-2", "image", file("照片.png"));
+        const firstAttempt = task.controller;
+
+        // 重试复用同一个 task，但换成新的尝试身份（与 runCanvasUpload 的开头一致）。
+        task.controller = new AbortController();
+        expect(isCanvasUploadAttemptLive(task, firstAttempt)).toBe(false);
+        expect(isCanvasUploadAttemptLive(task, task.controller)).toBe(true);
+        expect(isCanvasUploadAttemptCurrent(task, task.controller)).toBe(true);
+
+        // 旧尝试的成功回填不写；旧尝试结束时的清理也不能删掉新尝试。
+        const written = updateCanvasUploadNode(
+            [node],
+            PROJECT,
+            PROJECT,
+            "image-2",
+            () => ({ metadata: { status: "success", storageKey: "permanent/old.webp" } }),
+            () => isCanvasUploadAttemptLive(task, firstAttempt),
+        );
+        expect(written[0]).toBe(node);
+        expect(isCanvasUploadAttemptCurrent(task, firstAttempt)).toBe(false);
+        expect(readCanvasUploadTask("image-2")).toBe(task);
+
+        // 只有当前尝试结束时才真正释放。
+        endCanvasUploadTask("image-2");
+        expect(readCanvasUploadTask("image-2")).toBeUndefined();
+    });
+
+    it("取消上传时同一逻辑操作里清掉该节点的全部关联连线", () => {
+        const connections = [
+            { id: "edge-1", fromNodeId: "image-3", toNodeId: "text-3" },
+            { id: "edge-2", fromNodeId: "text-3", toNodeId: "image-3" },
+            { id: "edge-3", fromNodeId: "text-3", toNodeId: "text-4" },
+        ];
+
+        const cleaned = removeConnectionsForNodes(connections, new Set(["image-3"]));
+        expect(cleaned.map((connection) => connection.id)).toEqual(["edge-3"]);
+        // 没有可清理的边时返回原数组，不制造无意义的引用变化。
+        expect(removeConnectionsForNodes(cleaned, new Set(["image-3"]))).toBe(cleaned);
     });
 
     it("基本校验不通过的文件不占用画布", () => {

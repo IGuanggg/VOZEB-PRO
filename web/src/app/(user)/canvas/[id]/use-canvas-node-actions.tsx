@@ -8,7 +8,7 @@ import { resizeImageNodeToNaturalRatio } from "../utils/canvas-node-size";
 
 import { createCanvasNode } from "./canvas-page-elements";
 import { createCanvasNodeClipboard, createPastedCanvasNodes, type CanvasNodeClipboardPayload } from "./canvas-node-clipboard";
-import { findFreeNodePosition, getGenerationCount } from "./canvas-page-utils";
+import { findFreeNodePosition, getGenerationCount, removeConnectionsForNodes } from "./canvas-page-utils";
 
 import type { CanvasPageState } from "./use-canvas-page-state";
 
@@ -35,7 +35,7 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
         setToolbarNodeId,
         setDialogNodeId,
         setEditingNodeId,
-        setEditRequestNonce,
+        requestTextEditFocus,
         setInfoNodeId,
         setCropNodeId,
         setMaskEditNodeId,
@@ -64,14 +64,14 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
             if (type === CanvasNodeType.Text) {
-                // 新建文字节点直接进入编辑态，DOM 挂载完成后由 editRequestNonce 聚焦。
+                // 新建文字节点直接进入编辑态，DOM 挂载完成后由这个节点自己的聚焦请求把光标放到末尾。
                 setEditingNodeId(newNode.id);
-                setEditRequestNonce((value) => value + 1);
+                requestTextEditFocus(newNode.id);
             } else if (type !== CanvasNodeType.Audio) {
                 setDialogNodeId(newNode.id);
             }
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
+        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter, requestTextEditFocus, setEditingNodeId, setSelectedConnectionId, setSelectedNodeIds, setNodes],
     );
 
     const deleteNodes = useCallback((ids: Set<string>) => {
@@ -100,7 +100,7 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
                 };
             });
         });
-        setConnections((prev) => prev.filter((conn) => !allIds.has(conn.fromNodeId) && !allIds.has(conn.toNodeId)));
+        setConnections((prev) => removeConnectionsForNodes(prev, allIds));
         setSelectedNodeIds(new Set());
         setSelectedConnectionId(null);
         setHoveredNodeId((current) => (current && allIds.has(current) ? null : current));

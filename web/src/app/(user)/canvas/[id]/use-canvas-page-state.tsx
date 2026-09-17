@@ -1,8 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-
+import { useCallback, useEffect, useRef, useState } from "react";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -74,7 +73,9 @@ export function useCanvasPageState() {
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
     const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-    const [editRequestNonce, setEditRequestNonce] = useState(0);
+    // 显式聚焦请求：只属于被请求的那个文本节点，节点消费一次，退出编辑会话时作废。
+    // 普通点击/聚焦定位不生成命令，也不会复用上一个节点的旧请求。
+    const [textEditFocusRequest, setTextEditFocusRequest] = useState<{ nodeId: string; nonce: number } | null>(null);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
@@ -91,6 +92,16 @@ export function useCanvasPageState() {
     const [collapsingBatchIds, setCollapsingBatchIds] = useState<Set<string>>(new Set());
     const [openingBatchIds, setOpeningBatchIds] = useState<Set<string>>(new Set());
     const [isNodeDragging, setIsNodeDragging] = useState(false);
+
+    /** 为某个文本节点登记一次“进入编辑并把光标放到末尾”的显式请求。 */
+    const requestTextEditFocus = useCallback((nodeId: string) => {
+        setTextEditFocusRequest((current) => ({ nodeId, nonce: (current?.nonce ?? 0) + 1 }));
+    }, []);
+
+    /** 编辑会话结束或节点离开：作废属于它的聚焦请求，避免旧命令被重新消费。 */
+    const releaseTextEditFocus = useCallback((nodeId: string) => {
+        setTextEditFocusRequest((current) => (current?.nodeId === nodeId ? null : current));
+    }, []);
 
     const nodesRef = useRef(nodes);
     const connectionsRef = useRef(connections);
@@ -185,8 +196,9 @@ export function useCanvasPageState() {
         setDialogNodeId,
         editingNodeId,
         setEditingNodeId,
-        editRequestNonce,
-        setEditRequestNonce,
+        textEditFocusRequest,
+        requestTextEditFocus,
+        releaseTextEditFocus,
         infoNodeId,
         setInfoNodeId,
         cropNodeId,

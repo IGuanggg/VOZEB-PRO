@@ -824,6 +824,167 @@ test("R2 相邻返回的两个文件同样只占一步撤销", async ({ page, re
     }
 });
 
+test("N1 正文中间连续输入时光标停在原位，不因重渲染跳回末尾", async ({ page, request }) => {
+    // N1 回归：自动聚焦 effect 依赖每次渲染新建的回调（页面内联 onTextEditStart）与同一个非零
+    // editRequestNonce。正文更新页面 nodes 后 effect 重跑，焦点被重新放回末尾，光标从中间跳到最后。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("N1 caret stability"),
+        viewport: { x: 0, y: 0, k: 1 },
+        nodes: [],
+        connections: [],
+    });
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        await page.getByRole("button", ADD_TEXT_BUTTON).click();
+        const textId = await expectNewCanvasNode(page, []);
+        const textarea = page.locator(`[data-node-id="${textId}"] ${TEXT_NODE_CONTENT}`);
+        await expect.poll(() => textarea.evaluate((element) => document.activeElement === element)).toBe(true);
+
+        await page.keyboard.type("abcd");
+        await expect(textarea).toHaveValue("abcd");
+        // 光标移到中间：Home 之后两次右移，然后连续输入两个字符。
+        await page.keyboard.press("Home");
+        await page.keyboard.press("ArrowRight");
+        await page.keyboard.press("ArrowRight");
+        await page.keyboard.type("X");
+        await expect(textarea).toHaveValue("abXcd");
+        expect(await caretPosition(textarea)).toBe(3);
+
+        await page.keyboard.type("Y");
+        await expect(textarea).toHaveValue("abXYcd");
+        expect(await caretPosition(textarea)).toBe(4);
+        await expect(surface).toBeVisible();
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("N1 已有非零聚焦请求时点击另一段正文编辑不会跳到末尾", async ({ page, request }) => {
+    const content = "已有正文内容足够长，用来确认点击中间进入编辑时光标不会自己跳到末尾。";
+    const project = await createCanvasProject(request, {
+        title: projectTitle("N1 existing text caret"),
+        viewport: { x: 40, y: 80, k: 1 },
+        nodes: [node("n1-text", "text", 40, 120, 380, 220, { content })],
+        connections: [],
+    });
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const textarea = page.locator(`[data-node-id="n1-text"] ${TEXT_NODE_CONTENT}`);
+        // 先新建一个文字节点，让页面上存在一次非零的聚焦请求。
+        await page.getByRole("button", ADD_TEXT_BUTTON).click();
+        await expectNewCanvasNode(page, ["n1-text"]);
+        await focusCanvasSurface(page, surface);
+
+        // 点击已有正文中间：光标应停在点击位置，不能复用上一个节点的聚焦命令。
+        await textarea.click({ position: { x: 60, y: 12 } });
+        const clicked = await caretPosition(textarea);
+        expect(clicked).toBeLessThan(content.length);
+        await page.keyboard.type("改");
+        const edited = await textarea.inputValue();
+        expect(edited).not.toBe(content);
+        expect(edited.endsWith("改")).toBe(false);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R3 取消后恢复的节点不被迟到的旧上传结果改写", async ({ page, request }) => {
+    // R3 回归：图片上传的 HTTP 请求成功之后还要等待不接收 AbortSignal 的尺寸读取。
+    // 这里先放行 POST、挂起尺寸读取，再取消上传并撤销恢复同 ID 占位：迟到的旧尝试不得写回。
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R3 late attempt"),
+        viewport: { x: 0, y: 0, k: 1 },
+        nodes: [],
+        connections: [],
+    });
+    const fixture = uploadFixture();
+    const files = ["canvas-r3-one.webp"];
+    const { release, awaitMedia, releaseMedia } = await holdCanvasUploads(page, fixture, files, { holdMedia: true });
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const nodes = page.locator("[data-node-id]");
+
+        await dropCanvasFiles(surface, fixture, files);
+        const placeholder = page.locator('[data-node-id^="image-"]');
+        await expect(placeholder).toHaveCount(1);
+
+        // 服务器已保存，尺寸读取还在途：等它真的挂起后再取消。
+        await release(files[0]!);
+        await awaitMedia(files[0]!);
+
+        // 取消上传：节点移除、任务中止；随后撤销把同 ID 占位恢复出来（没有内存任务 → 可重试错误态）。
+        await placeholder.getByRole("button", { name: "取消" }).click();
+        await expect(nodes).toHaveCount(0);
+        await focusCanvasSurface(page, surface);
+        await page.keyboard.press("Control+z");
+        const restored = page.locator('[data-node-id^="image-"]');
+        await expect(restored).toHaveCount(1);
+        await expect(restored).toContainText("重新选择文件");
+
+        // 释放迟到的尺寸读取：旧尝试的成功回调不得把恢复出来的节点改回 success。
+        await releaseMedia(files[0]!);
+        await page.waitForTimeout(600);
+        await expect(restored.locator("img")).toHaveCount(0);
+        await expect(restored).toContainText("重新选择文件");
+        await expect(restored).not.toContainText("上传中");
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("R6 取消上传同时移除该节点的连线，撤销重做保持图一致", async ({ page, request }) => {
+    const project = await createCanvasProject(request, {
+        title: projectTitle("R6 cancel graph"),
+        viewport: { x: 40, y: 80, k: 1 },
+        nodes: [node("r6-text", "text", 40, 400, 320, 200, { content: "连线目标" })],
+        connections: [],
+    });
+    const projectPath = `/api/canvas/projects/${project.id}`;
+    const fixture = uploadFixture();
+    const files = ["canvas-r6-one.webp"];
+    const { release } = await holdCanvasUploads(page, fixture, files);
+
+    try {
+        const surface = await openCanvas(page, project.id);
+        const placeholder = page.locator('[data-node-id^="image-"]');
+        const edges = page.locator("[data-connection-id]");
+
+        await dropCanvasFiles(surface, fixture, files);
+        await expect(placeholder).toHaveCount(1);
+
+        // 上传中的占位节点连到文字节点。
+        await dragConnectionToNode(page, placeholder, page.locator('[data-node-id="r6-text"]'));
+        await expect(edges).toHaveCount(1);
+        await expectCanvasSaved(page);
+
+        // 取消上传：节点与关联连线在同一个逻辑操作里移除，不留悬空边。
+        await placeholder.getByRole("button", { name: "取消" }).click();
+        await expect(placeholder).toHaveCount(0);
+        await expect(edges).toHaveCount(0);
+        await expectCanvasSaved(page);
+        await expect.poll(async () => (await readCanvasProjectGraph(request, projectPath)).connections).toBe(0);
+
+        // 撤销：占位节点和连线一起回来（两端都存在，不是悬空边）。
+        await focusCanvasSurface(page, surface);
+        await page.keyboard.press("Control+z");
+        await expect(placeholder).toHaveCount(1);
+        await expect(edges).toHaveCount(1);
+
+        // 重做：再次取消的结果也一样干净。
+        await page.keyboard.press("Control+Shift+z");
+        await expect(placeholder).toHaveCount(0);
+        await expect(edges).toHaveCount(0);
+        await expect.poll(async () => (await readCanvasProjectGraph(request, projectPath)).connections).toBe(0);
+
+        await release(files[0]!); // 放行挂起的请求，避免测试结束时仍有在途 fetch
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
 function node(id: string, type: string, x: number, y: number, width: number, height: number, metadata: Record<string, unknown>): CanvasNodeSeed {
     return { id, type, title: id, position: { x, y }, width, height, metadata };
 }
@@ -943,26 +1104,68 @@ async function dropCanvasFiles(surface: Locator, fixture: Buffer, names: string[
 }
 
 // 挂起站内媒体上传：按上传请求里的 originalName 分别放行，用来覆盖 A→B / B→A 的返回顺序，不依赖真实慢网络。
-async function holdCanvasUploads(page: Page, fixture: Buffer, names: string[]) {
+// holdMedia 用于复现“服务器已保存、尺寸读取还没回来”的窗口：那时 abort 已经无法中断异步链。
+async function holdCanvasUploads(page: Page, fixture: Buffer, names: string[], options: { holdMedia?: boolean } = {}) {
     const releases = new Map<string, () => Promise<void>>();
+    const mediaReleases = new Map<string, () => Promise<void>>();
+    const tokenFor = (name: string) => `permanent/${name.replace(/\.webp$/, "")}.webp`;
     await page.route("**/api/reference-assets", async (route) => {
         if (route.request().method() !== "POST") return route.continue();
         const body = route.request().postDataBuffer()?.toString("utf8") || "";
         const name = names.find((item) => body.includes(item));
         if (!name) return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "e2e 只放行本用例声明的文件" }) });
-        const token = `permanent/${name.replace(/\.webp$/, "")}.webp`;
+        const token = tokenFor(name);
         releases.set(name, () => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ token, key: token, url: `/api/reference-assets/${token}`, bytes: fixture.length, mimeType: "image/webp" }) }));
     });
     await page.route("**/api/reference-assets/permanent/*", async (route) => {
-        await route.fulfill({ status: 200, contentType: "image/webp", body: fixture });
+        if (!options.holdMedia) return route.fulfill({ status: 200, contentType: "image/webp", body: fixture });
+        const token = new URL(route.request().url()).pathname.replace("/api/reference-assets/", "");
+        mediaReleases.set(token, () => route.fulfill({ status: 200, contentType: "image/webp", body: fixture }));
     });
+    const waitFor = async (map: Map<string, unknown>, key: string, message: string) => {
+        await expect.poll(() => map.has(key), { message }).toBe(true);
+    };
     return {
         // 没有收到对应请求时直接失败，不静默跳过。
         async release(name: string) {
-            await expect.poll(() => releases.has(name), { message: `${name} 的上传请求没有被挂起` }).toBe(true);
+            await waitFor(releases, name, `${name} 的上传请求没有被挂起`);
             await releases.get(name)!();
         },
+        async awaitMedia(name: string) {
+            await waitFor(mediaReleases, tokenFor(name), `${tokenFor(name)} 的尺寸读取没有被挂起`);
+        },
+        async releaseMedia(name: string) {
+            await waitFor(mediaReleases, tokenFor(name), `${tokenFor(name)} 的尺寸读取没有被挂起`);
+            await mediaReleases.get(tokenFor(name))!();
+        },
     };
+}
+
+/** 读回服务端项目里的节点与连线数量：确认取消后没有悬空边落盘。 */
+async function readCanvasProjectGraph(request: APIRequestContext, path: string) {
+    const response = await request.get(path);
+    expect(response.ok(), await response.text()).toBe(true);
+    const project = ((await response.json()) as { data: { project: { nodes: unknown[]; connections: unknown[] } } }).data.project;
+    return { nodes: project.nodes.length, connections: project.connections.length };
+}
+
+/** 正文输入框的插入光标位置。 */
+async function caretPosition(textarea: Locator) {
+    return textarea.evaluate((element) => (element as HTMLTextAreaElement).selectionStart);
+}
+
+// 从节点的输出连接点拖到目标节点中心：占位节点与普通节点共用同一套连接点。
+async function dragConnectionToNode(page: Page, sourceNode: Locator, targetNode: Locator) {
+    const targetBounds = await targetNode.boundingBox();
+    expect(targetBounds, "目标节点没有可见的 boundingBox").not.toBeNull();
+    await sourceNode.hover();
+    const handle = sourceNode.locator('[data-canvas-handle="source"]');
+    const bounds = await handle.boundingBox();
+    expect(bounds, "源节点没有可见的输出连接点").not.toBeNull();
+    await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(targetBounds!.x + targetBounds!.width / 2, targetBounds!.y + targetBounds!.height / 2, { steps: 8 });
+    await page.mouse.up();
 }
 
 // 只做浏览器层能做的事：合成 KeyboardEvent 携带 isComposing，返回该事件是否被应用 preventDefault。

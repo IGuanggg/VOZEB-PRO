@@ -176,7 +176,9 @@ export function canvasUploadFillPatch(node: CanvasNodeData, kind: CanvasUploadKi
 }
 
 // 迟到回调保护：节点已被删除、撤销、换过媒体或已切换项目时返回原数组，绝不复活节点，也不写进其他项目。
-export function updateCanvasUploadNode(nodes: CanvasNodeData[], projectId: string, activeProjectId: string, nodeId: string, patch: (node: CanvasNodeData) => Partial<CanvasNodeData>): CanvasNodeData[] {
+// isValid 在函数式写入处再校验一次尝试身份：取消后撤销恢复的同 ID 节点、被替换的新尝试都不能被旧回调改写。
+export function updateCanvasUploadNode(nodes: CanvasNodeData[], projectId: string, activeProjectId: string, nodeId: string, patch: (node: CanvasNodeData) => Partial<CanvasNodeData>, isValid?: () => boolean): CanvasNodeData[] {
+    if (isValid && !isValid()) return nodes;
     const target = projectId === activeProjectId ? nodes.find((node) => node.id === nodeId) : undefined;
     if (!isCanvasUploadPlaceholder(target)) return nodes;
     return nodes.map((node) => (node.id === nodeId ? { ...node, ...patch(node) } : node));
@@ -233,6 +235,33 @@ export function cancelCanvasUploadTask(nodeId: string) {
     task.controller.abort();
     endCanvasUploadTask(nodeId);
     return true;
+}
+
+/**
+ * 每次尝试的不可变身份校验：只有仍然登记在案、还是同一次尝试、且没有被取消的回调才能写回。
+ * 图片尺寸读取不接收 AbortSignal，abort 后异步链仍可能继续，所以不能只靠 abort 判断。
+ */
+/**
+ * 这次尝试本身还有效：没有被更新的一次尝试替换，也没有被取消。
+ * 只在写回处使用：函数式 setNodes 会被 React 延后执行，那个时刻登记表可能已经清理，
+ * 所以写回判定只看不可变的尝试身份与取消状态。
+ */
+export function isCanvasUploadAttemptLive(task: CanvasUploadTask, attempt: AbortController) {
+    return task.controller === attempt && !attempt.signal.aborted;
+}
+
+/**
+ * 清理前额外确认登记表里仍然是这次任务：旧尝试结束时不按 nodeId 盲目删除新一次尝试。
+ * 图片尺寸读取不接收 AbortSignal，abort 之后异步链仍可能继续，所以不能只靠 abort 判断。
+ */
+export function isCanvasUploadAttemptCurrent(task: CanvasUploadTask, attempt: AbortController) {
+    return readCanvasUploadTask(task.nodeId) === task && isCanvasUploadAttemptLive(task, attempt);
+}
+
+/** 节点被删除或取消上传后的图清理：任何一端不存在的连线都不再保留，没有可清理项时返回原数组。 */
+export function removeConnectionsForNodes(connections: CanvasConnection[], removedNodeIds: Set<string>) {
+    if (!connections.some((connection) => removedNodeIds.has(connection.fromNodeId) || removedNodeIds.has(connection.toNodeId))) return connections;
+    return connections.filter((connection) => !removedNodeIds.has(connection.fromNodeId) && !removedNodeIds.has(connection.toNodeId));
 }
 
 export function listCanvasUploadTasks() {

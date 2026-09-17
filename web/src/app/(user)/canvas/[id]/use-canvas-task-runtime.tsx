@@ -95,8 +95,6 @@ export function useCanvasTaskRuntime({ state }: { state: CanvasPageState }) {
         setDialogNodeId,
         editingNodeId,
         setEditingNodeId,
-        editRequestNonce,
-        setEditRequestNonce,
         infoNodeId,
         setInfoNodeId,
         cropNodeId,

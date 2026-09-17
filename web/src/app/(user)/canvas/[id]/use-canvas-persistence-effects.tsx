@@ -96,8 +96,6 @@ export function useCanvasPersistenceEffects({ state, tasks }: { state: CanvasPag
         setDialogNodeId,
         editingNodeId,
         setEditingNodeId,
-        editRequestNonce,
-        setEditRequestNonce,
         infoNodeId,
         setInfoNodeId,
         cropNodeId,

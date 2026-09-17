@@ -136,6 +136,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
     const imageBorderColor = isActive ? selectionBlue : isRelated && !isBatchChild ? theme.node.muted : theme.node.stroke;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    // 已消费的显式聚焦请求：同一个 nonce 只聚焦一次，普通渲染不重放。
+    const consumedEditRequestRef = useRef(0);
     const clickStartRef = useRef<{ x: number; y: number } | null>(null);
     const resizeRef = useRef({
         isResizing: false,
@@ -175,10 +177,15 @@ export const CanvasNode = React.memo(function CanvasNode({
     }, [data.type, isEditingContent]);
 
     useEffect(() => {
-        if (!editRequestNonce || data.type !== CanvasNodeType.Text) return;
+        // 显式聚焦请求只消费一次：输入、保存、选择等普通渲染不得重复聚焦，
+        // 否则每次正文更新都会把光标重新顶到末尾（依赖身份变化同样不能重放这条命令）。
+        if (!editRequestNonce || data.type !== CanvasNodeType.Text || consumedEditRequestRef.current === editRequestNonce) return;
         enterTextEditing();
         // 只有新建或显式请求编辑时才把光标放到末尾；点击已有正文由浏览器保留点击位置。
         const frame = requestAnimationFrame(() => {
+            // 真正执行聚焦时才标记已消费：effect 重跑（含开发态双重挂载）仍然会重新安排这一帧，
+            // 但普通渲染不会再重放已经执行过的命令。
+            consumedEditRequestRef.current = editRequestNonce;
             const textarea = textareaRef.current;
             textarea?.focus();
             textarea?.setSelectionRange(textarea.value.length, textarea.value.length);

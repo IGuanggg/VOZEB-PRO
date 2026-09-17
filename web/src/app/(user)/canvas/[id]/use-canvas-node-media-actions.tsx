@@ -45,7 +45,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
         setRunningNodeId,
         setDialogNodeId,
         setEditingNodeId,
-        setEditRequestNonce,
+        requestTextEditFocus,
         setCropNodeId,
         setMaskEditNodeId,
         setSplitNodeId,
@@ -127,14 +127,17 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
         );
     }, []);
 
-    const openTextEditor = useCallback((node: CanvasNodeData) => {
-        if (node.type !== CanvasNodeType.Text) return;
-        setSelectedNodeIds(new Set([node.id]));
-        setSelectedConnectionId(null);
-        setDialogNodeId(node.id);
-        setEditingNodeId(node.id);
-        setEditRequestNonce((value) => value + 1);
-    }, []);
+    const openTextEditor = useCallback(
+        (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Text) return;
+            setSelectedNodeIds(new Set([node.id]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(node.id);
+            setEditingNodeId(node.id);
+            requestTextEditFocus(node.id);
+        },
+        [setDialogNodeId, setEditingNodeId, setSelectedConnectionId, setSelectedNodeIds, requestTextEditFocus],
+    );
 
     const handleNodePromptChange = useCallback((nodeId: string, prompt: string) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt } } : node)));
