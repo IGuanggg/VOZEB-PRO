@@ -58,6 +58,8 @@ function parseCanvasNodeClipboard(json: string): CanvasNodeClipboardPayload | nu
         // 识别成功之前必须验证粘贴会直接使用的每个字段：缺字段时宁可整份按不识别处理，
         // 走普通文本回退，也不能半插入或在粘贴时抛未捕获异常。
         if (!parsed.nodes.every(isClipboardNode)) return null;
+        // 节点身份必须唯一：idMap 后写覆盖前写会让两个副本拿到同一个新 id，选择/更新/连线再无法区分。
+        if (new Set(parsed.nodes.map((node) => node.id)).size !== parsed.nodes.length) return null;
         const connections = Array.isArray(parsed.connections) ? parsed.connections : [];
         if (!connections.every(isClipboardConnection)) return null;
         return { version: parsed.version, nodes: parsed.nodes, connections };
@@ -66,14 +68,28 @@ function parseCanvasNodeClipboard(json: string): CanvasNodeClipboardPayload | nu
     }
 }
 
+/**
+ * 支持粘贴的节点类型：取值与 `CanvasNodeType` 一致。
+ * 这里用字面量而不是 import 枚举，是为了不给剪贴板模块引入新的运行时依赖
+ * （独立审查探针按模块白名单载入本文件）；canvas-node-clipboard.test.ts 会断言两者一致。
+ */
+const SUPPORTED_NODE_TYPES = ["image", "panorama", "text", "config", "video", "audio", "brief", "task", "brand-kit"];
+
+/** UI 与处理器按字符串读取的 metadata 字段：类型不对会在下游抛错（例如 content.trim）。 */
+const STRING_METADATA_FIELDS: (keyof CanvasNodeMetadata)[] = ["content", "prompt", "promptDraft", "composerContent"];
+
 /** 粘贴会直接用这些字段算边界、改标题并按 id 重映射组内引用。 */
 function isClipboardNode(value: unknown): value is CanvasNodeData {
     if (!value || typeof value !== "object") return false;
     const node = value as Partial<CanvasNodeData>;
-    if (typeof node.id !== "string" || typeof node.type !== "string" || typeof node.title !== "string") return false;
+    if (typeof node.id !== "string" || !node.id) return false;
+    if (typeof node.type !== "string" || !SUPPORTED_NODE_TYPES.includes(node.type)) return false;
+    if (typeof node.title !== "string") return false;
     if (!Number.isFinite(node.position?.x) || !Number.isFinite(node.position?.y)) return false;
-    if (!Number.isFinite(node.width) || !Number.isFinite(node.height)) return false;
+    const { width, height } = node;
+    if (typeof width !== "number" || typeof height !== "number" || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
     if (node.metadata !== undefined && (!node.metadata || typeof node.metadata !== "object")) return false;
+    if (!STRING_METADATA_FIELDS.every((field) => node.metadata?.[field] === undefined || typeof node.metadata?.[field] === "string")) return false;
     return [node.metadata?.batchChildIds, node.metadata?.references, node.metadata?.brandKit?.approvedNodeIds, node.metadata?.brandKit?.rejectedNodeIds].every(isOptionalIdList);
 }
 

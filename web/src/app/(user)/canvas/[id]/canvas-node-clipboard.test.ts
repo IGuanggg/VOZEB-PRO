@@ -96,6 +96,37 @@ describe("节点剪贴板编解码", () => {
         expect(createPastedCanvasNodes(parsed!, { x: 0, y: 0 }).nodes).toHaveLength(2);
     });
 
+    it("重复 id、未知类型、非法尺寸与错误 metadata 类型都整份拒绝", () => {
+        const full = { id: "x", type: "text", title: "t", position: { x: 0, y: 0 }, width: 200, height: 160, metadata: { content: "正文" } };
+        const wrap = (nodes: unknown[]) => `vozeb-canvas-nodes:v1:${JSON.stringify({ version: 1, nodes, connections: [] })}`;
+
+        const bad = [
+            // 重复 id：粘贴后两个副本会拿到同一个新 id，选择/更新/连线再无法区分
+            wrap([full, { ...full, position: { x: 400, y: 0 } }]),
+            wrap([{ ...full, id: "" }]), // 空 id
+            wrap([{ ...full, type: "mystery" }]), // 未知节点类型
+            wrap([{ ...full, width: 0 }]), // 非正尺寸
+            wrap([{ ...full, height: -20 }]),
+            wrap([{ ...full, metadata: "nope" }]), // metadata 不是对象
+            wrap([{ ...full, metadata: { content: 123 } }]), // 下游 content.trim 会抛错
+            wrap([{ ...full, metadata: { promptDraft: 42 } }]),
+        ];
+
+        bad.forEach((text) => expect(readCanvasNodeClipboardText(text)).toBeNull());
+        // 同类型的合法载荷仍然可以解析。
+        expect(readCanvasNodeClipboardText(wrap([full]))).not.toBeNull();
+    });
+
+    it("支持的节点类型列表与 CanvasNodeType 保持一致，且每种类型都能解析", () => {
+        // 剪贴板模块为了不引入运行时依赖用字面量维护类型白名单，这里保证它不会和枚举漂移。
+        const supported = ["image", "panorama", "text", "config", "video", "audio", "brief", "task", "brand-kit"];
+        expect([...Object.values(CanvasNodeType)].sort()).toEqual([...supported].sort());
+        supported.forEach((type) => {
+            const payload = { id: "x", type, title: "t", position: { x: 0, y: 0 }, width: 200, height: 160 };
+            expect(readCanvasNodeClipboardText(`vozeb-canvas-nodes:v1:${JSON.stringify({ version: 1, nodes: [payload], connections: [] })}`)).not.toBeNull();
+        });
+    });
+
     it("没有选中节点时返回空，不写入剪贴板", () => {
         expect(createCanvasNodeClipboard([imageNode(), textNode("text-b")], [connection], new Set())).toBeNull();
     });

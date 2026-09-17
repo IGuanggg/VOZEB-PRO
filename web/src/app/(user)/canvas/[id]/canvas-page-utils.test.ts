@@ -16,7 +16,7 @@ vi.mock("@/services/image-storage", async (importOriginal) => ({
     uploadImage: mocks.uploadImage,
 }));
 
-import { applyNodeConfigPatch, getGenerationCount, hydrateAssistantImages, hydrateCanvasImages, normalizeCanvasConfigNodeLayout, replaceCanvasNodeMediaMetadata } from "./canvas-page-utils";
+import { applyNodeConfigPatch, getGenerationCount, hydrateAssistantImages, hydrateCanvasImages, isCanvasUploadPlaceholder, normalizeCanvasConfigNodeLayout, replaceCanvasNodeMediaMetadata } from "./canvas-page-utils";
 
 describe("Canvas project hydration", () => {
     beforeEach(() => {
@@ -108,6 +108,19 @@ describe("Canvas media replacement", () => {
         expect(metadata.videoTask).toBeUndefined();
         expect(metadata.isBatchRoot).toBeUndefined();
         expect(metadata.batchChildIds).toBeUndefined();
+    });
+
+    it("N4 换上新媒体后清掉上传失败状态，节点不再被当成上传占位", () => {
+        // 失败上传的占位节点带着 uploadFailed=true；用户改成另一个文件并上传成功后，
+        // 旧实现在 spread 原 metadata 之后没有清掉这个标记，于是 success 与 uploadFailed 并存：
+        // 节点仍被 isCanvasUploadPlaceholder 判为上传占位，旧任务/File 也不会被清理 effect 释放。
+        const failed = { status: "error" as const, uploadFailed: true, errorDetails: "上传失败：网络中断" };
+        const replaced = replaceCanvasNodeMediaMetadata(failed, { status: "success" as const, content: "/api/reference-assets/B.webp", storageKey: "permanent/B.webp" });
+        expect(replaced.status).toBe("success");
+        expect(replaced.storageKey).toBe("permanent/B.webp");
+        expect(replaced.uploadFailed).toBeUndefined();
+        expect(replaced.errorDetails).toBeUndefined();
+        expect(isCanvasUploadPlaceholder({ id: "image-1", type: CanvasNodeType.Image, title: "B.webp", position: { x: 0, y: 0 }, width: 240, height: 240, metadata: replaced })).toBe(false);
     });
 });
 

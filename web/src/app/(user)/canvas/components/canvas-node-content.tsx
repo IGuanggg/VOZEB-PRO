@@ -276,6 +276,8 @@ export function UnknownNodeContent({ theme }: Pick<NodeContentRendererProps, "th
 }
 
 export function TextContent({ node, theme, textareaRef, mentionReferences, onContentChange, onActivateNode, onStopEditing, onStartEditing, onGenerateImage }: NodeContentRendererProps) {
+    // 本次按下是否已经由 pointerdown 处理过选择：触控/笔的兼容 mousedown 不能再切换一次。
+    const pointerActivatedRef = useRef(false);
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
 
@@ -313,11 +315,15 @@ export function TextContent({ node, theme, textareaRef, mentionReferences, onCon
                 }}
                 onMouseDown={(event) => {
                     // 正文区域是编辑区：只切换选中态，不启动节点拖动，浏览器自行定位光标。
-                    onActivateNode?.(event, node.id);
+                    // 鼠标走 mousedown、触控/笔走 pointerdown：同一次按下只能切换一次选择，
+                    // 否则 Ctrl/Shift/Meta 点击会“加了又删”，表现为多选加不上、点击已选节点取消不掉。
+                    if (!pointerActivatedRef.current) onActivateNode?.(event, node.id);
+                    pointerActivatedRef.current = false;
                     event.stopPropagation();
                 }}
                 onPointerDown={(event) => {
-                    onActivateNode?.(event, node.id);
+                    pointerActivatedRef.current = event.pointerType !== "mouse";
+                    if (pointerActivatedRef.current) onActivateNode?.(event, node.id);
                     event.stopPropagation();
                 }}
                 onWheel={(event) => event.stopPropagation()}

@@ -985,46 +985,51 @@ test("R6 取消上传同时移除该节点的连线，撤销重做保持图一�
     }
 });
 
-// R4 待确认项（浏览器已复现，竞态未定位）：正文 textarea 的 onPointerDown 与 onMouseDown 都调用同一个
-// 带 Ctrl/Shift/Meta toggle 的 onActivateNode。实测同一个手势的净效果不稳定：
-//   run 1：Ctrl 点击未选中节点 → 2 个选中；再 Ctrl 点击同一节点 → 仍是 2（等于没切换，or 加了又删）；
-//   run 2：Shift 点击已选中节点 → 1（等于只切换一次）。
-// 两次都失败，且失败步骤不同 —— 说明这是“两个事件入口在同一手势里各切换一次”的竞态，
-// 而不是稳定的双向行为。修复方向：只让一个事件入口改变选择，另一个只隔离冒泡（按 Pointer Events 特性判定回退）。
-// 在没有定位到稳定机制前不提交推测性改动，因此用 fixme 固定复现步骤与实测值。
-test.fixme("R4 正文区域修饰键点击只切换一次选择（当前竞态：偶发切换两次，待定位）", async ({ page, request }) => {
+// R4 回归：正文 textarea 的 onPointerDown 与 onMouseDown 原先都调用带 Ctrl/Shift/Meta toggle 的
+// onActivateNode，同一次按下会切换两次。诊断日志（记录每次 handleNodeActivate 的 before/after）：
+//   Ctrl 点击 B：pointerdown before=[A] after=[A,B] → mousedown before=[A,B] after=[A]
+// 即“加了又删”，页面上表现为多选加不上、点击已选节点取消不掉。
+// 修复：鼠标走 mousedown、触控/笔走 pointerdown，同一次按下只切换一次。
+// 量取选中数前必须把指针移出节点：被悬停的节点会进入 relatedHighlight，边框同样是选中蓝。
+test("R4 正文区域修饰键点击只切换一次选择，且不牺牲光标定位", async ({ page, request }) => {
     const contentA = "第一段正文内容足够长，用来确认点击中间不会把光标抛到末尾。";
     const project = await createCanvasProject(request, {
         title: projectTitle("R4 modifier toggle"),
         viewport: { x: 40, y: 80, k: 1 },
-        nodes: [node("r4-text-a", "text", 40, 120, 380, 220, { content: contentA }), node("r4-text-b", "text", 40, 420, 380, 220, { content: "第二段正文" })],
+        nodes: [node("r4-text-a", "text", 400, 120, 380, 220, { content: contentA }), node("r4-text-b", "text", 400, 420, 380, 220, { content: "第二段正文" })],
         connections: [],
     });
 
     try {
-        await openCanvas(page, project.id);
+        const surface = await openCanvas(page, project.id);
         const areaA = page.locator(`[data-node-id="r4-text-a"] ${TEXT_NODE_CONTENT}`);
         const areaB = page.locator(`[data-node-id="r4-text-b"] ${TEXT_NODE_CONTENT}`);
         const clickOptions = { position: { x: 40, y: 10 } } as const;
 
         // 单选：正文点击只选中本节点，光标留在点击处而不是被抛到末尾。
         await areaA.click(clickOptions);
-        await expectSelectedNodeCount(page, 1);
+        await expectSelectedNodeCount(page, surface, 1);
         expect(await caretPosition(areaA)).toBeLessThan(contentA.length);
 
-        // Ctrl 点击未选中节点：加入多选（只切换一次 → 2）。
+        // Ctrl 点击未选中节点：加入多选。
         await areaB.click({ ...clickOptions, modifiers: ["Control"] });
-        await expectSelectedNodeCount(page, 2);
+        await expectSelectedNodeCount(page, surface, 2);
 
-        // Ctrl 点击已选中节点：取消选择（只切换一次 → 1）。实测这里会停在 2。
+        // Ctrl 再点击同一个已选中节点：取消选择。
         await areaB.click({ ...clickOptions, modifiers: ["Control"] });
-        await expectSelectedNodeCount(page, 1);
+        await expectSelectedNodeCount(page, surface, 1);
 
-        // Shift / Meta 同义，各自只切换一次。
+        // Shift 同义：加入，再取消。
         await areaB.click({ ...clickOptions, modifiers: ["Shift"] });
-        await expectSelectedNodeCount(page, 2);
+        await expectSelectedNodeCount(page, surface, 2);
+        await areaB.click({ ...clickOptions, modifiers: ["Shift"] });
+        await expectSelectedNodeCount(page, surface, 1);
+
+        // Meta 同义。
         await areaB.click({ ...clickOptions, modifiers: ["Meta"] });
-        await expectSelectedNodeCount(page, 1);
+        await expectSelectedNodeCount(page, surface, 2);
+        await areaB.click({ ...clickOptions, modifiers: ["Meta"] });
+        await expectSelectedNodeCount(page, surface, 1);
 
         // 修饰键点击正文后仍能正常输入，且光标不跳末尾。
         await areaA.click(clickOptions);
@@ -1033,6 +1038,59 @@ test.fixme("R4 正文区域修饰键点击只切换一次选择（当前竞态�
         const edited = await areaA.inputValue();
         expect(edited).not.toBe(contentA);
         expect(edited.endsWith("改")).toBe(false);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+// N3 回归：requestTextEditFocus 的序号原先从“当前请求”加一，而退出编辑会把请求清成 null，
+// 于是第二次显式编辑拿到的还是 nonce=1；仍挂载的节点已经消费过 1，新请求被当成旧请求忽略。
+// 显式编辑请求自己的可观察结果是“光标移到末尾”（面板会自动抢焦点，所以不用 activeElement 判定）。
+// 每轮先把光标停在中间并退出编辑，再点真实 UI 的“编辑文本”，末尾光标的出现即代表请求被消费。
+test("N3 显式编辑同一节点多次都生效，退出后再次编辑会重新聚焦", async ({ page, request }) => {
+    const contentA = "正文内容用于确认显式编辑每次都聚焦并定位到末尾。";
+    const project = await createCanvasProject(request, {
+        title: projectTitle("N3 explicit edit"),
+        viewport: { x: 40, y: 80, k: 1 },
+        nodes: [node("n3-text-a", "text", 400, 120, 380, 220, { content: contentA }), node("n3-text-b", "text", 400, 420, 380, 220, { content: "另一段正文" })],
+        connections: [],
+    });
+
+    try {
+        await openCanvas(page, project.id);
+        const areaA = page.locator(`[data-node-id="n3-text-a"] ${TEXT_NODE_CONTENT}`);
+        const areaB = page.locator(`[data-node-id="n3-text-b"] ${TEXT_NODE_CONTENT}`);
+        const toolbar = page.locator("[data-canvas-hover-toolbar]");
+        const editButton = toolbar.getByRole("button", { name: "编辑文本" });
+
+        // 显式编辑会打开提示词面板并抢走键盘焦点，所以断言只看光标位置；
+        // 面板渲染在节点内部会挡住正文区域，因此悬停用裸鼠标移动、插入点用 DOM 直接设置，
+        // 真正的行为仍由真实工具栏点击触发。工具栏是页面级单实例且绑定“当前悬停节点”，
+        // 所以悬停点取节点下缘：上方节点打开的面板不会挡在这里，否则会点到上一个节点的工具栏。
+        const editText = async (nodeId: string) => {
+            const box = await page.locator(`[data-node-id="${nodeId}"]`).boundingBox();
+            expect(box, `${nodeId} 没有可见的 boundingBox`).not.toBeNull();
+            await page.mouse.move(box!.x + 40, box!.y + box!.height - 8);
+            await expect(toolbar).toBeVisible({ timeout: 10_000 });
+            await editButton.click({ timeout: 10_000 });
+        };
+        const putCaretAt = async (area: Locator) => {
+            await area.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(2, 2));
+            await expect.poll(() => caretPosition(area)).toBe(2);
+        };
+        // 一轮：把插入点放到中间 → 点真实工具栏“编辑文本” → 请求被消费时插入点落到末尾。
+        const explicitEditMovesCaretToEnd = async (nodeId: string, area: Locator, content: string) => {
+            await putCaretAt(area);
+            await editText(nodeId);
+            await expect.poll(() => caretPosition(area)).toBe(content.length);
+        };
+
+        // 同一个仍挂载的节点连续显式编辑两次：请求序号必须继续增长，否则第二次会停在中间。
+        await explicitEditMovesCaretToEnd("n3-text-a", areaA, contentA);
+        await explicitEditMovesCaretToEnd("n3-text-a", areaA, contentA);
+        // A → B → A 来回都不失效。
+        await explicitEditMovesCaretToEnd("n3-text-b", areaB, "另一段正文");
+        await explicitEditMovesCaretToEnd("n3-text-a", areaA, contentA);
     } finally {
         await deleteCanvasProject(request, project.id);
     }
@@ -1207,8 +1265,14 @@ async function caretPosition(textarea: Locator) {
     return textarea.evaluate((element) => (element as HTMLTextAreaElement).selectionStart);
 }
 
-/** 当前被选中的节点数量：选中态就是节点外框使用画布主题的选中蓝。 */
-async function expectSelectedNodeCount(page: Page, count: number) {
+/**
+ * 当前被选中的节点数量：选中态就是节点外框使用画布主题的选中蓝。
+ * 量取前把指针移到画布空白处：被悬停的节点会进入 relatedHighlight，边框同样是选中蓝，
+ * 不先移开就会把“悬停”数成“选中”。
+ */
+async function expectSelectedNodeCount(page: Page, surface: Locator, count: number) {
+    const bounds = await surface.boundingBox();
+    if (bounds) await page.mouse.move(bounds.x + 24, bounds.y + 24);
     await expect.poll(() => page.locator("[data-node-id] > div").evaluateAll((elements) => elements.filter((element) => getComputedStyle(element).borderColor === "rgb(47, 128, 255)").length)).toBe(count);
 }
 

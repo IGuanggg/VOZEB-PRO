@@ -73,9 +73,10 @@ export function useCanvasPageState() {
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
     const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-    // 显式聚焦请求：只属于被请求的那个文本节点，节点消费一次，退出编辑会话时作废。
-    // 普通点击/聚焦定位不生成命令，也不会复用上一个节点的旧请求。
-    const [textEditFocusRequest, setTextEditFocusRequest] = useState<{ nodeId: string; nonce: number } | null>(null);
+    // 显式聚焦请求：只属于被请求的那个文本节点，节点消费一次，退出编辑会话时只作废目标。
+    // 序号只增不减（作废时保留 nonce）：否则同一个仍挂载的节点会拿到和上次相同的序号，
+    // 把第二次显式编辑当成已经消费过的旧请求而忽略。
+    const [textEditFocusRequest, setTextEditFocusRequest] = useState<{ nodeId: string | null; nonce: number } | null>(null);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
@@ -98,9 +99,9 @@ export function useCanvasPageState() {
         setTextEditFocusRequest((current) => ({ nodeId, nonce: (current?.nonce ?? 0) + 1 }));
     }, []);
 
-    /** 编辑会话结束或节点离开：作废属于它的聚焦请求，避免旧命令被重新消费。 */
+    /** 编辑会话结束或节点离开：作废属于它的聚焦目标，但保留序号，下一次显式编辑仍然生效。 */
     const releaseTextEditFocus = useCallback((nodeId: string) => {
-        setTextEditFocusRequest((current) => (current?.nodeId === nodeId ? null : current));
+        setTextEditFocusRequest((current) => (current?.nodeId === nodeId ? { nodeId: null, nonce: current.nonce } : current));
     }, []);
 
     const nodesRef = useRef(nodes);

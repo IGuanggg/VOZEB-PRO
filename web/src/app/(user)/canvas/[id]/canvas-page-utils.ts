@@ -312,6 +312,9 @@ export function replaceCanvasNodeMediaMetadata(current: CanvasNodeMetadata | und
         textTask: undefined,
         audioTask: undefined,
         errorDetails: undefined,
+        // 换成新媒体的节点必须退出“上传失败/重试”链：否则 status=success 与 uploadFailed=true 并存，
+        // 节点仍被当成上传占位，旧任务、原始 File 与 blob 预览都不会释放。
+        uploadFailed: undefined,
         freeResize: false,
         ...media,
         ...patch,
