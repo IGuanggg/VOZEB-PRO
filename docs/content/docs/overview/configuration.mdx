@@ -69,7 +69,11 @@ POSTGRES_PASSWORD=replace-with-a-strong-database-password
 
 使用宝塔宿主机 PostgreSQL 时，应用通过 `docker-compose.baota.yml` 的 host 网络连接 `127.0.0.1:5432`；不要同时启动默认 Compose 中的 PostgreSQL 服务。
 
-## 0.0.6 发布部署要求
+## v0.0.7 更新要求
+
+v0.0.7 不包含数据库 Schema 变更，可从 v0.0.6 正常更新。更新前仍建议备份数据库与媒体文件；保留现有 `.env`、PostgreSQL 数据卷和媒体数据卷，不要执行 `docker compose down -v`。
+
+## v0.0.6 的旧版本安装迁移要求
 
 安装过 0.0.2 的用户必须停止旧服务并删除旧数据库或数据库卷，然后重新拉取 0.0.6 代码或镜像并重新安装项目。0.0.6 不支持沿用 0.0.2 数据库或原地升级；删除旧数据库会清除其中的数据。
 
