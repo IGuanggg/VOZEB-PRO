@@ -1,4 +1,4 @@
-import type { CanvasNodeData } from "../types";
+import type { CanvasNodeData, CanvasNodeMetadata } from "../types";
 
 import type { CanvasHistoryEntry } from "./canvas-page-elements";
 
@@ -82,6 +82,13 @@ function isSameCanvasHistoryContent(previous: CanvasHistoryEntry, next: CanvasHi
     return isSameCanvasHistoryFields(previous, next) && previous.nodes.length === next.nodes.length && previous.nodes.every((node, index) => node === next.nodes[index]);
 }
 
+// 上传回填的变换只驻留内存，随结果 metadata 回收；不得把 File/回调写入项目数据。
+const uploadSettlements = new WeakMap<CanvasNodeMetadata, (node: CanvasNodeData) => CanvasNodeData>();
+
+export function recordCanvasUploadSettlement(result: CanvasNodeData, settle: (node: CanvasNodeData) => CanvasNodeData) {
+    if (result.metadata) uploadSettlements.set(result.metadata, settle);
+}
+
 /**
  * 一次导入只占一步历史：异步回填（占位拿到成功结果或可重试的失败）并入发起导入的那一步。
  * - 已入栈快照只吸收这次尝试的媒体字段：快照自己的位置、尺寸、标题与其他用户修改都保留，
@@ -103,32 +110,34 @@ export function settleCanvasHistoryUploads(
     });
     if (!results.size) return { timeline, head };
 
-    const settleEntry = (entry: CanvasHistoryEntry, live: boolean) => {
+    const settleEntry = (entry: CanvasHistoryEntry) => {
         let changed = false;
         const nodes = entry.nodes.map((node) => {
             const result = results.get(node.id);
             if (!result || result === node || !isUploading(node)) return node;
             changed = true;
-            // live 只用来判断“HEAD 是否已经等于屏幕状态”，真正写回历史的是只换 metadata 的版本。
-            return live ? result : { ...node, metadata: result.metadata };
+            // 对每个历史节点重放上传自身的变换，不能吸收 live 节点尚未提交的位置/标题/草稿。
+            const settle = result.metadata && uploadSettlements.get(result.metadata);
+            const settled = settle ? settle(node) : { ...node, metadata: result.metadata };
+            // 只有内容确实一致时才复用引用；回填自身无需另占一步历史。
+            return JSON.stringify(settled) === JSON.stringify(result) ? result : settled;
         });
         return changed ? { ...entry, nodes } : entry;
     };
     const settleEntries = (entries: CanvasHistoryEntry[]) => {
         let changed = false;
         const next = entries.map((entry) => {
-            const settled = settleEntry(entry, false);
+            const settled = settleEntry(entry);
             if (settled !== entry) changed = true;
             return settled;
         });
         return changed ? next : entries;
     };
 
-    const liveHead = head ? settleEntry(head, true) : null;
-    const settledHead = head ? settleEntry(head, false) : null;
+    const settledHead = head ? settleEntry(head) : null;
     return {
         timeline: { past: settleEntries(timeline.past), future: settleEntries(timeline.future) },
-        head: liveHead && liveHead !== head && isSameCanvasHistoryContent(liveHead, current) ? current : settledHead,
+        head: settledHead && settledHead !== head && isSameCanvasHistoryContent(settledHead, current) ? current : settledHead,
     };
 }
 

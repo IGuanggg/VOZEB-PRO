@@ -437,15 +437,7 @@ export function resolveImageUrlLike(value: string, baseUrl: string, config: Imag
 
 function rawImageBase64DataUrl(value: string) {
     const base64 = value.trim().replace(/\s/g, "");
-    const mimeType = base64.startsWith("/9j/")
-        ? "image/jpeg"
-        : base64.startsWith("iVBORw0KGgo")
-          ? "image/png"
-          : base64.startsWith("R0lGOD")
-            ? "image/gif"
-            : base64.startsWith("UklGR")
-              ? "image/webp"
-              : "";
+    const mimeType = base64.startsWith("/9j/") ? "image/jpeg" : base64.startsWith("iVBORw0KGgo") ? "image/png" : base64.startsWith("R0lGOD") ? "image/gif" : base64.startsWith("UklGR") ? "image/webp" : "";
     return mimeType && /^[a-z0-9+/=_-]+$/i.test(base64) ? `data:${mimeType};base64,${base64}` : "";
 }
 

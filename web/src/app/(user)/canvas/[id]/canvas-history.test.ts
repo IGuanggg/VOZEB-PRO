@@ -8,6 +8,7 @@ import {
     isSameCanvasHistoryEntry,
     isStructuralCanvasHistoryChange,
     planCanvasHistoryCommit,
+    recordCanvasUploadSettlement,
     settleCanvasHistoryUploads,
     transitionCanvasHistory,
     type CanvasHistoryBoundary,
@@ -352,6 +353,30 @@ describe("Canvas history upload settle", () => {
         const afterB = uploadState([afterA.nodes[0]!, filledNode("image-b")]);
         return { empty, pending, afterA, afterB };
     }
+
+    it("keeps a drag undo step when upload completes before pointerup", () => {
+        const harness = createCommitHarness();
+        const empty = uploadState([]);
+        const initial = uploadState([uploadNode("image-a")]);
+        const moving = uploadState([{ ...initial.nodes[0]!, position: { x: 200, y: 0 } }]);
+        const media = { status: "success" as const, content: "/api/reference-assets/permanent/image-a.webp", storageKey: "permanent/image-a.webp" };
+        const finished = uploadState([{ ...moving.nodes[0]!, metadata: media }]);
+        recordCanvasUploadSettlement(finished.nodes[0]!, (node) => ({ ...node, metadata: media }));
+
+        harness.load(empty);
+        harness.change(initial);
+        harness.change(initial, { dragging: true });
+        harness.change(moving, { dragging: true });
+        harness.change(finished, { dragging: true });
+        harness.change(finished, { dragging: false });
+
+        const beforeMove = harness.undo();
+        expect(beforeMove?.nodes[0]?.position.x).toBe(0);
+        expect(beforeMove?.nodes[0]?.metadata?.storageKey).toBe(media.storageKey);
+        expect(harness.redo()?.nodes[0]?.position.x).toBe(200);
+        expect(harness.undo()?.nodes[0]?.position.x).toBe(0);
+        expect(harness.undo()?.nodes).toHaveLength(0);
+    });
 
     it("settles each finished file into the import step instead of creating undo steps", () => {
         vi.useFakeTimers();

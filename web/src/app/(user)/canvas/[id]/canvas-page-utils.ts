@@ -15,6 +15,7 @@ import { fitNodeSize, nodeSizeFromRatio, resizeImageNodeToNaturalRatio } from ".
 import { PANORAMA_IMAGE_SIZE } from "../utils/canvas-panorama";
 import { CanvasNodeType, isCanvasImageNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type ConnectionHandle, type Position } from "../types";
 import { CANVAS_DROP_NODE_OFFSET, NODE_STATUS_ERROR, VIDEO_NODE_MAX_HEIGHT, VIDEO_NODE_MAX_WIDTH } from "./canvas-page-elements";
+import { recordCanvasUploadSettlement } from "./canvas-history";
 
 const NODE_CREATE_MAX_ATTEMPTS = 12;
 
@@ -171,8 +172,16 @@ export function canvasUploadFillPatch(node: CanvasNodeData, kind: CanvasUploadKi
     const spec = NODE_DEFAULT_SIZE[CANVAS_UPLOAD_NODE_TYPE[kind]];
     const naturalWidth = metadata.naturalWidth || (kind === "video" ? 1280 : spec.width);
     const naturalHeight = metadata.naturalHeight || (kind === "video" ? 720 : spec.height);
-    const size = kind === "audio" ? spec : kind === "video" ? fitNodeSize(naturalWidth, naturalHeight, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT) : fitNodeSize(naturalWidth, naturalHeight);
-    return { width: size.width, height: size.height, position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 }, metadata };
+    const size = node.metadata?.freeResize
+        ? { width: node.width, height: node.height }
+        : node.type === CanvasNodeType.Panorama
+          ? NODE_DEFAULT_SIZE[CanvasNodeType.Panorama]
+          : kind === "audio"
+            ? spec
+            : kind === "video"
+              ? fitNodeSize(naturalWidth, naturalHeight, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT)
+              : fitNodeSize(naturalWidth, naturalHeight);
+    return { width: size.width, height: size.height, position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 }, metadata: { ...metadata, uploadFailed: undefined, errorDetails: undefined } };
 }
 
 // 迟到回调保护：节点已被删除、撤销、换过媒体或已切换项目时返回原数组，绝不复活节点，也不写进其他项目。
@@ -181,7 +190,16 @@ export function updateCanvasUploadNode(nodes: CanvasNodeData[], projectId: strin
     if (isValid && !isValid()) return nodes;
     const target = projectId === activeProjectId ? nodes.find((node) => node.id === nodeId) : undefined;
     if (!isCanvasUploadPlaceholder(target)) return nodes;
-    return nodes.map((node) => (node.id === nodeId ? { ...node, ...patch(node) } : node));
+    const apply = (node: CanvasNodeData) => {
+        const changes = patch(node);
+        return { ...node, ...changes, metadata: { ...node.metadata, ...changes.metadata } };
+    };
+    return nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+        const result = apply(node);
+        if (isCanvasUploading(node) && !isCanvasUploading(result)) recordCanvasUploadSettlement(result, apply);
+        return result;
+    });
 }
 
 export type CanvasUploadTask = {
@@ -191,6 +209,7 @@ export type CanvasUploadTask = {
     file: File;
     previewUrl: string;
     controller: AbortController;
+    previousNode?: CanvasNodeData;
 };
 
 // 原始 File 与 blob 预览只放在页面内存 Map（按节点 id）：节点 metadata 会持久化到服务端，不能带这些临时内容。
@@ -202,6 +221,7 @@ export function renewCanvasUploadPreview(task: CanvasUploadTask) {
 }
 
 export function beginCanvasUploadTask(projectId: string, nodeId: string, kind: CanvasUploadKind, file: File) {
+    cancelCanvasUploadTask(nodeId);
     const task: CanvasUploadTask = { projectId, nodeId, kind, file, previewUrl: "", controller: new AbortController() };
     renewCanvasUploadPreview(task);
     canvasUploadTasks.set(nodeId, task);

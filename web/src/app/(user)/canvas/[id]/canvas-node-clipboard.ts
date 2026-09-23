@@ -155,6 +155,11 @@ function copyNodeMetadata(metadata: CanvasNodeMetadata | undefined, idMap: Map<s
     UNSAFE_COPY_KEYS.forEach((key) => delete next[key]);
 
     if (next.status === NODE_STATUS_LOADING) next.status = next.content ? NODE_STATUS_SUCCESS : NODE_STATUS_IDLE;
+    if (next.status === "uploading" || next.uploadFailed) {
+        next.status = next.content ? NODE_STATUS_SUCCESS : NODE_STATUS_IDLE;
+        delete next.uploadFailed;
+        delete next.errorDetails;
+    }
 
     // 组内引用只能指向本次一起复制的节点，指向未复制节点的引用必须丢弃。
     const batchChildIds = remapIds(next.batchChildIds, idMap);
@@ -165,6 +170,8 @@ function copyNodeMetadata(metadata: CanvasNodeMetadata | undefined, idMap: Map<s
         delete next.batchChildIds;
         delete next.primaryImageId;
         delete next.isBatchRoot;
+        delete next.batchUsesReferenceImages;
+        delete next.imageBatchExpanded;
     }
     const batchRootId = next.batchRootId ? idMap.get(next.batchRootId) : undefined;
     if (batchRootId) next.batchRootId = batchRootId;

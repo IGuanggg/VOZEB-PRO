@@ -3,8 +3,7 @@ import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 // F1–F6 修复用的浏览器回归配置。
-// 与 playwright.config.ts 的唯一区别：应用 webServer 不使用 `pnpm run start`（本机 pnpm 包装器路径异常），
-// 改为直接启动 Next 并使用 reuseExistingServer，因此可以复用已经跑起来的开发服务器。
+// 直接启动隔离端口的 Next，避免复用本机其他服务。
 const port = Number(process.env.VOZEB_PRO_E2E_PORT || 3000);
 const baseURL = `http://127.0.0.1:${port}`;
 const protocolFixturePort = Number(process.env.VOZEB_PRO_PROTOCOL_FIXTURE_PORT || 4010);
@@ -40,23 +39,24 @@ export default defineConfig({
             command: "node scripts/protocol-fixture-server.mjs",
             url: `http://127.0.0.1:${protocolFixturePort}/health`,
             timeout: 30_000,
-            reuseExistingServer: true,
+            reuseExistingServer: false,
             env: { ...process.env, VOZEB_PRO_PROTOCOL_FIXTURE_PORT: String(protocolFixturePort) },
         },
         {
             command: "node scripts/payment-fixture-server.mjs",
             url: `http://127.0.0.1:${paymentFixturePort}/health`,
             timeout: 30_000,
-            reuseExistingServer: true,
+            reuseExistingServer: false,
             env: { ...process.env, VOZEB_PRO_PAYMENT_FIXTURE_PORT: String(paymentFixturePort) },
         },
         {
-            command: "node scripts/run-app.mjs dev",
+            command: `node node_modules/next/dist/bin/next dev --webpack -H 127.0.0.1 -p ${port}`,
             url: `${baseURL}/api/auth/session`,
             timeout: 180_000,
-            reuseExistingServer: true,
+            reuseExistingServer: false,
             env: {
                 ...process.env,
+                NEXT_DIST_DIR: ".next-e2e-review",
                 PORT: String(port),
                 NEXT_PUBLIC_SITE_URL: baseURL,
                 VOZEB_PRO_DATABASE_PROVIDER: "file",

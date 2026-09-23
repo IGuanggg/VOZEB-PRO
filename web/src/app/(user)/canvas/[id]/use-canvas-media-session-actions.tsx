@@ -5,14 +5,10 @@ import { useCallback } from "react";
 
 import { droppedFiles, preventFileDragEvent } from "@/lib/file-drop";
 import { readImageMeta } from "@/lib/image-utils";
-import { uploadMediaFile } from "@/services/file-storage";
-import { NODE_DEFAULT_SIZE } from "../constants";
 import { CanvasNodeType, type CanvasAssistantSession, type Position } from "../types";
-import { fitNodeSize } from "../utils/canvas-node-size";
-import { PANORAMA_IMAGE_SIZE, isPanoramaRatio } from "../utils/canvas-panorama";
+import { isPanoramaRatio } from "../utils/canvas-panorama";
 
-import { VIDEO_NODE_MAX_HEIGHT, VIDEO_NODE_MAX_WIDTH } from "./canvas-page-elements";
-import { audioMetadata, canvasUploadPositions, imageMetadata, isAudioFile, isGenerationCanceled, replaceCanvasNodeMediaMetadata, uploadCanvasImage, videoMetadata } from "./canvas-page-utils";
+import { canvasUploadPositions, isAudioFile, isGenerationCanceled } from "./canvas-page-utils";
 
 import type { CanvasInteractions } from "./use-canvas-interactions";
 import type { CanvasPageState } from "./use-canvas-page-state";
@@ -42,7 +38,7 @@ export function useCanvasMediaSessionActions({ state, interactions, files }: { s
         nodesRef,
     } = state;
     const { screenToCanvas } = interactions;
-    const { createImageFileNode, createVideoFileNode, createAudioFileNode } = files;
+    const { createImageFileNode, createVideoFileNode, createAudioFileNode, replaceCanvasFileNode } = files;
 
     const handleUploadRequest = useCallback((nodeId?: string, position?: Position) => {
         uploadTargetRef.current = { nodeId, position };
@@ -63,54 +59,9 @@ export function useCanvasMediaSessionActions({ state, interactions, files }: { s
 
             try {
                 if (target?.nodeId) {
-                    if (isAudioFile(file)) {
-                        const audio = await uploadMediaFile(file, "audio");
-                        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
-                        setNodes((prev) =>
-                            prev.map((node) =>
-                                node.id === target.nodeId
-                                    ? {
-                                          ...node,
-                                          type: CanvasNodeType.Audio,
-                                          title: file.name,
-                                          position: { x: node.position.x + node.width / 2 - spec.width / 2, y: node.position.y + node.height / 2 - spec.height / 2 },
-                                          width: spec.width,
-                                          height: spec.height,
-                                          metadata: replaceCanvasNodeMediaMetadata(node.metadata, audioMetadata(audio)),
-                                      }
-                                    : node,
-                            ),
-                        );
-                        setSelectedNodeIds(new Set([target.nodeId]));
-                        setSelectedConnectionId(null);
-                        return;
-                    }
-                    if (file.type.startsWith("video/")) {
-                        const video = await uploadMediaFile(file, "video");
-                        const nextSize = fitNodeSize(video.width || 1280, video.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                        setNodes((prev) =>
-                            prev.map((node) =>
-                                node.id === target.nodeId
-                                    ? {
-                                          ...node,
-                                          type: CanvasNodeType.Video,
-                                          title: file.name,
-                                          position: { x: node.position.x + node.width / 2 - nextSize.width / 2, y: node.position.y + node.height / 2 - nextSize.height / 2 },
-                                          width: nextSize.width,
-                                          height: nextSize.height,
-                                          metadata: replaceCanvasNodeMediaMetadata(node.metadata, videoMetadata(video)),
-                                      }
-                                    : node,
-                            ),
-                        );
-                        setSelectedNodeIds(new Set([target.nodeId]));
-                        setSelectedConnectionId(null);
-                        setDialogNodeId(target.nodeId);
-                        return;
-                    }
                     const targetNode = nodesRef.current.find((node) => node.id === target.nodeId);
-                    const isPanorama = targetNode?.type === CanvasNodeType.Panorama;
-                    if (isPanorama) {
+                    if (!targetNode) return;
+                    if (targetNode.type === CanvasNodeType.Panorama && file.type.startsWith("image/")) {
                         const objectUrl = URL.createObjectURL(file);
                         const dimensions = await readImageMeta(objectUrl).finally(() => URL.revokeObjectURL(objectUrl));
                         if (!isPanoramaRatio(dimensions.width, dimensions.height)) {
@@ -118,26 +69,7 @@ export function useCanvasMediaSessionActions({ state, interactions, files }: { s
                             return;
                         }
                     }
-                    const image = await uploadCanvasImage(file);
-                    const imageSize = isPanorama ? NODE_DEFAULT_SIZE[CanvasNodeType.Panorama] : fitNodeSize(image.width, image.height);
-                    setNodes((prev) =>
-                        prev.map((node) =>
-                            node.id === target.nodeId
-                                ? {
-                                      ...node,
-                                      type: isPanorama ? CanvasNodeType.Panorama : CanvasNodeType.Image,
-                                      title: file.name,
-                                      position: { x: node.position.x + node.width / 2 - imageSize.width / 2, y: node.position.y + node.height / 2 - imageSize.height / 2 },
-                                      width: imageSize.width,
-                                      height: imageSize.height,
-                                      metadata: replaceCanvasNodeMediaMetadata(node.metadata, imageMetadata(image), isPanorama ? { size: PANORAMA_IMAGE_SIZE, panoramaProjection: "equirectangular" } : undefined),
-                                  }
-                                : node,
-                        ),
-                    );
-                    setSelectedNodeIds(new Set([target.nodeId]));
-                    setSelectedConnectionId(null);
-                    setDialogNodeId(target.nodeId);
+                    await replaceCanvasFileNode(targetNode, isAudioFile(file) ? "audio" : file.type.startsWith("video/") ? "video" : "image", file);
                 } else {
                     const position = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
                     await (isAudioFile(file) ? createAudioFileNode(file, position) : file.type.startsWith("video/") ? createVideoFileNode(file, position) : createImageFileNode(file, position));
@@ -150,7 +82,7 @@ export function useCanvasMediaSessionActions({ state, interactions, files }: { s
                 event.target.value = "";
             }
         },
-        [createAudioFileNode, createImageFileNode, createVideoFileNode, message, nodesRef, screenToCanvas, size.height, size.width],
+        [createAudioFileNode, createImageFileNode, createVideoFileNode, replaceCanvasFileNode, message, nodesRef, screenToCanvas, size.height, size.width],
     );
 
     const handleDrop = useCallback(

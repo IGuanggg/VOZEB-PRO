@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { clipboardImageFiles } from "@/lib/clipboard-image-files";
 import { uploadMediaFile } from "@/services/file-storage";
 import { CanvasNodeType, type CanvasNodeData, type Position } from "../types";
+import { PANORAMA_IMAGE_SIZE } from "../utils/canvas-panorama";
 
 import { NODE_STATUS_ERROR, NODE_STATUS_SUCCESS, createCanvasNode } from "./canvas-page-elements";
 import { readCanvasNodeClipboard, writeCanvasNodeClipboard } from "./canvas-node-clipboard";
@@ -28,6 +29,7 @@ import {
     releaseCanvasUploadPreview,
     removeConnectionsForNodes,
     renewCanvasUploadPreview,
+    replaceCanvasNodeMediaMetadata,
     updateCanvasUploadNode,
     uploadCanvasImage,
     type CanvasUploadKind,
@@ -121,6 +123,38 @@ export function useCanvasFileActions({ state, interactions }: { state: CanvasPag
 
     const createAudioFileNode = useCallback((file: File, position: Position, preserveSelection = false) => createCanvasFileNode("audio", file, position, preserveSelection, false), [createCanvasFileNode]);
 
+    const replaceCanvasFileNode = useCallback(
+        async (node: CanvasNodeData, kind: CanvasUploadKind, file: File) => {
+            if (!isCanvasUploadFile(kind, file)) throw new Error("文件为空或格式不正确");
+            const activeTask = readCanvasUploadTask(node.id);
+            // 新导入的占位节点没有可恢复的旧内容；替换它时不能把“上传中”快照当成取消目标。
+            const previousNode = activeTask ? activeTask.previousNode : node.metadata?.status === "uploading" ? undefined : node;
+            const task = beginCanvasUploadTask(projectIdRef.current, node.id, kind, file);
+            task.previousNode = previousNode;
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id !== node.id
+                        ? item
+                        : {
+                              ...item,
+                              type: kind === "image" && item.type === CanvasNodeType.Panorama ? CanvasNodeType.Panorama : kind === "image" ? CanvasNodeType.Image : kind === "video" ? CanvasNodeType.Video : CanvasNodeType.Audio,
+                              title: file.name,
+                              metadata: replaceCanvasNodeMediaMetadata(
+                                  item.metadata,
+                                  { content: undefined, storageKey: undefined, remoteUrl: undefined, serverUrl: undefined, naturalWidth: undefined, naturalHeight: undefined, status: "uploading" },
+                                  item.type === CanvasNodeType.Panorama && kind === "image" ? { size: PANORAMA_IMAGE_SIZE, panoramaProjection: "equirectangular", freeResize: item.metadata?.freeResize } : { freeResize: item.metadata?.freeResize },
+                              ),
+                          },
+                ),
+            );
+            setSelectedNodeIds(new Set([node.id]));
+            setSelectedConnectionId(null);
+            await runCanvasUpload(task);
+            if (!task.controller.signal.aborted && kind !== "audio") setDialogNodeId(node.id);
+        },
+        [runCanvasUpload, setDialogNodeId, setNodes, setSelectedNodeIds, setSelectedConnectionId],
+    );
+
     const createTextNodeFromClipboard = useCallback(
         (text: string) => {
             const trimmed = text.trim();
@@ -144,7 +178,13 @@ export function useCanvasFileActions({ state, interactions }: { state: CanvasPag
     // 取消上传：abort 后在途回调不再写回，占位节点、关联连线、blob 预览与相关面板在同一个逻辑操作里移除。
     const cancelCanvasUpload = useCallback(
         (nodeId: string) => {
+            const previousNode = readCanvasUploadTask(nodeId)?.previousNode;
             if (!cancelCanvasUploadTask(nodeId)) return false;
+            // 已有节点的上传取消后恢复原内容，保留上传期间移动的位置和连线。
+            if (previousNode) {
+                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...previousNode, position: node.position } : node)));
+                return true;
+            }
             setNodes((prev) => prev.filter((node) => node.id !== nodeId));
             // 与节点删除共用同一份图清理：任何一端不存在的连线都不留在项目状态里。
             setConnections((prev) => removeConnectionsForNodes(prev, new Set([nodeId])));
@@ -310,6 +350,7 @@ export function useCanvasFileActions({ state, interactions }: { state: CanvasPag
         createImageFileNode,
         createVideoFileNode,
         createAudioFileNode,
+        replaceCanvasFileNode,
         createTextNodeFromClipboard,
         handleCanvasUploadNode,
     };

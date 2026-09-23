@@ -215,8 +215,18 @@ describe("粘贴节点副本", () => {
         expect(paste([imageNode({ metadata: { status: "loading", content: "/api/reference-assets/permanent/a.png" } })]).nodes[0].metadata?.status).toBe("success");
     });
 
+    it("上传占位与失败节点的副本不会带着不可用任务状态等待", () => {
+        const uploading = paste([imageNode({ metadata: { status: "uploading" } })]).nodes[0];
+        expect(uploading.metadata?.status).toBe("idle");
+        expect(uploading.metadata?.uploadFailed).toBeUndefined();
+        const failed = paste([imageNode({ metadata: { status: "error", uploadFailed: true, errorDetails: "原文件丢失" } })]).nodes[0];
+        expect(failed.metadata?.status).toBe("idle");
+        expect(failed.metadata?.uploadFailed).toBeUndefined();
+        expect(failed.metadata?.errorDetails).toBeUndefined();
+    });
+
     it("组内引用重映射到副本，指向未复制节点的引用被丢弃", () => {
-        const root = imageNode({ id: "image-root", metadata: { isBatchRoot: true, batchChildIds: ["image-c1", "image-c2"], primaryImageId: "image-c1" } });
+        const root = imageNode({ id: "image-root", metadata: { isBatchRoot: true, imageBatchExpanded: true, batchUsesReferenceImages: true, batchChildIds: ["image-c1", "image-c2"], primaryImageId: "image-c1" } });
         const child = imageNode({ id: "image-c1", metadata: { batchRootId: "image-root" } });
         const orphan = imageNode({ id: "image-c2" });
 
@@ -226,6 +236,11 @@ describe("粘贴节点副本", () => {
         expect(copiedRoot?.metadata?.batchChildIds).toEqual([copiedChild?.id]);
         expect(copiedRoot?.metadata?.primaryImageId).toBe(copiedChild?.id);
         expect(copiedChild?.metadata?.batchRootId).toBe(copiedRoot?.id);
+
+        const withoutChildren = paste([root]);
+        expect(withoutChildren.nodes[0].metadata?.isBatchRoot).toBeUndefined();
+        expect(withoutChildren.nodes[0].metadata?.imageBatchExpanded).toBeUndefined();
+        expect(withoutChildren.nodes[0].metadata?.batchUsesReferenceImages).toBeUndefined();
 
         const withOrphan = paste([orphan]);
         expect(withOrphan.nodes[0].metadata?.batchRootId).toBeUndefined();

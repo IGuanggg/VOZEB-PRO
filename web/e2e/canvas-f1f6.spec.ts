@@ -1096,6 +1096,138 @@ test("N3 显式编辑同一节点多次都生效，退出后再次编辑会重�
     }
 });
 
+test("上传在拖动未松手时完成，撤销只还原移动而不移除图片", async ({ page, request }) => {
+    const project = await createCanvasProject(request, { title: projectTitle("upload during drag"), viewport: { x: 0, y: 0, k: 1 }, nodes: [], connections: [] });
+    const fixture = uploadFixture();
+    const file = "drag-settle.webp";
+    const { release } = await holdCanvasUploads(page, fixture, [file]);
+    try {
+        const surface = await openCanvas(page, project.id);
+        await dropCanvasFiles(surface, fixture, [file]);
+        const image = page.locator('[data-node-id^="image-"]');
+        await expect(image).toHaveCount(1);
+        await expect(image).toContainText("上传中");
+        const before = await requireBoundingBox(image);
+        await page.mouse.move(before.x + 30, before.y + 30);
+        await page.mouse.down();
+        await page.mouse.move(before.x + 170, before.y + 30, { steps: 8 });
+        await release(file);
+        await expect(image).not.toContainText("上传中");
+        await expect(image.locator("img").first()).toHaveAttribute("src", /drag-settle/);
+        await page.mouse.up();
+        const moved = await requireBoundingBox(image);
+        await focusCanvasSurface(page, surface);
+        await page.keyboard.press("Control+z");
+        await expect(image).toHaveCount(1);
+        await expect(image.locator("img").first()).toHaveAttribute("src", /drag-settle/);
+        const undone = await requireBoundingBox(image);
+        expect(moved.x - undone.x).toBeGreaterThan(80);
+        await page.keyboard.press("Control+y");
+        await expect.poll(async () => (await requireBoundingBox(image)).x).toBeCloseTo(moved.x, 0);
+        await page.keyboard.press("Control+z");
+        await page.keyboard.press("Control+z");
+        await expect(image).toHaveCount(0);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("已有空图片节点上传有占位及取消，取消恢复原节点", async ({ page, request }) => {
+    const project = await createCanvasProject(request, { title: projectTitle("target upload cancel"), viewport: { x: 0, y: 0, k: 1 }, nodes: [node("empty-image", "image", 200, 180, 240, 240, { status: "idle" })], connections: [] });
+    const fixture = uploadFixture();
+    const file = "target-upload.webp";
+    await holdCanvasUploads(page, fixture, [file]);
+    try {
+        await openCanvas(page, project.id);
+        const image = page.locator('[data-node-id="empty-image"]');
+        await image.hover();
+        await page.getByRole("button", { name: "上传图片", exact: true }).click();
+        await page.locator('input[type="file"][accept^="image/*,video/*"]').setInputFiles({ name: file, mimeType: "image/webp", buffer: fixture });
+        await expect(image).toContainText("上传中");
+        await expect(image.getByRole("button", { name: "取消" })).toBeVisible();
+        await image.getByRole("button", { name: "取消" }).click();
+        await expect(image).toHaveCount(1);
+        await expect(image).not.toContainText("上传中");
+        await expect(image).not.toContainText(file);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("导入占位上传中换文件后取消，不恢复失去任务的上传中节点", async ({ page, request }) => {
+    const project = await createCanvasProject(request, { title: projectTitle("replace pending import"), viewport: { x: 0, y: 0, k: 1 }, nodes: [], connections: [] });
+    const fixture = uploadFixture();
+    const firstFile = "pending-original.webp";
+    const secondFile = "pending-replacement.webp";
+    await holdCanvasUploads(page, fixture, [firstFile, secondFile]);
+    try {
+        const surface = await openCanvas(page, project.id);
+        const image = page.locator('[data-node-id^="image-"]');
+        await dropCanvasFiles(surface, fixture, [firstFile]);
+        await expect(image).toContainText("上传中");
+        await image.hover();
+        await page.getByRole("button", { name: "上传图片", exact: true }).click();
+        await page.locator('input[type="file"][accept^="image/*,video/*"]').setInputFiles({ name: secondFile, mimeType: "image/webp", buffer: fixture });
+        await expect(image).toContainText(secondFile);
+        await image.getByRole("button", { name: "取消" }).click();
+        await expect(image).toHaveCount(0);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("已有空图片节点上传成功后打开提示词面板", async ({ page, request }) => {
+    const project = await createCanvasProject(request, { title: projectTitle("target upload prompt"), viewport: { x: 0, y: 0, k: 1 }, nodes: [node("prompt-image", "image", 200, 180, 240, 240, { status: "idle" })], connections: [] });
+    const fixture = uploadFixture();
+    const file = "target-prompt.webp";
+    const { release } = await holdCanvasUploads(page, fixture, [file]);
+    try {
+        await openCanvas(page, project.id);
+        const image = page.locator('[data-node-id="prompt-image"]');
+        await image.hover();
+        await page.getByRole("button", { name: "上传图片", exact: true }).click();
+        await page.locator('input[type="file"][accept^="image/*,video/*"]').setInputFiles({ name: file, mimeType: "image/webp", buffer: fixture });
+        await expect(image).toContainText("上传中");
+        await release(file);
+        await expect(image.locator("img").first()).toHaveAttribute("src", /target-prompt/);
+        await expect(page.getByRole("textbox", { name: "节点提示词" })).toBeVisible();
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
+test("已有空图片节点上传失败后在原节点重试成功", async ({ page, request }) => {
+    const project = await createCanvasProject(request, { title: projectTitle("target upload retry"), viewport: { x: 0, y: 0, k: 1 }, nodes: [node("retry-image", "image", 200, 180, 240, 240, { status: "idle" })], connections: [] });
+    const fixture = uploadFixture();
+    let attempts = 0;
+    await page.route("**/api/reference-assets", async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        attempts += 1;
+        if (attempts === 1) return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "模拟上传失败" }) });
+        return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ token: "permanent/retry-image.webp", key: "permanent/retry-image.webp", url: "/api/reference-assets/permanent/retry-image.webp", bytes: fixture.length, mimeType: "image/webp" }),
+        });
+    });
+    await page.route("**/api/reference-assets/permanent/retry-image.webp*", (route) => route.fulfill({ status: 200, contentType: "image/webp", body: fixture }));
+    try {
+        await openCanvas(page, project.id);
+        const image = page.locator('[data-node-id="retry-image"]');
+        await image.hover();
+        await page.getByRole("button", { name: "上传图片", exact: true }).click();
+        await page.locator('input[type="file"][accept^="image/*,video/*"]').setInputFiles({ name: "retry-image.webp", mimeType: "image/webp", buffer: fixture });
+        await expect(image).toContainText("模拟上传失败");
+        await image.getByRole("button", { name: "重试", exact: true }).click();
+        await expect(image.locator("img").first()).toHaveAttribute("src", /retry-image/);
+        await expect(image).not.toContainText("模拟上传失败");
+        expect(attempts).toBe(2);
+        await expect(image).toHaveCount(1);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
 function node(id: string, type: string, x: number, y: number, width: number, height: number, metadata: Record<string, unknown>): CanvasNodeSeed {
     return { id, type, title: id, position: { x, y }, width, height, metadata };
 }

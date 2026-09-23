@@ -165,18 +165,13 @@ export function useCanvasNodeActions({ state, core }: { state: CanvasPageState; 
         const source = nodesRef.current.find((node) => node.id === nodeId);
         if (!source) return;
 
-        const id = `${source.type}-${nanoid()}`;
-        const next: CanvasNodeData = {
-            ...source,
-            id,
-            title: `${source.title} Copy`,
-            position: { x: source.position.x + 36, y: source.position.y + 36 },
-        };
+        const payload = createCanvasNodeClipboard([source], [], new Set([nodeId]))!;
+        const next = createPastedCanvasNodes(payload, { x: source.position.x + source.width / 2 + 36, y: source.position.y + source.height / 2 + 36 }).nodes[0];
 
         setNodes((prev) => [...prev, next]);
-        setSelectedNodeIds(new Set([id]));
+        setSelectedNodeIds(new Set([next.id]));
         setSelectedConnectionId(null);
-        setDialogNodeId(id);
+        setDialogNodeId(next.id);
     }, []);
 
     const copySelectedNodes = useCallback(() => {
