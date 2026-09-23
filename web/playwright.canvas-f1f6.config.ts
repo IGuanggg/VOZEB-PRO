@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
@@ -61,7 +62,7 @@ export default defineConfig({
                 NEXT_PUBLIC_SITE_URL: baseURL,
                 VOZEB_PRO_DATABASE_PROVIDER: "file",
                 VOZEB_PRO_DATA_DIR: path.join(process.cwd(), ".e2e-data"),
-                VOZEB_PRO_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                VOZEB_PRO_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
                 VOZEB_PRO_INSTALL_TOKEN: "vozeb-pro-e2e-install-token-32chars",
                 VOZEB_PRO_MAINTENANCE_TOKEN: "vozeb-pro-e2e-maintenance-token-32chars",
                 VOZEB_PRO_WORKER_TOKEN: "vozeb-pro-e2e-worker-token-separate-32chars",

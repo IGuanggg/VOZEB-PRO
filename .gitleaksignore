@@ -1,4 +1,5 @@
 # Audited false positives from deterministic test fixtures, documentation examples, and PEM wrappers.
+2cd81adee11604f685d94cb4452dda8aceb1c153:web/playwright.canvas-f1f6.config.ts:generic-api-key:64
 21c4070927623160e7e62723ed50bbe4a759c542:.github/workflows/docker-image.yml:generic-api-key:68
 21c4070927623160e7e62723ed50bbe4a759c542:.github/workflows/quality.yml:generic-api-key:79
 2242bed6929a8a7cdf410bb43cfc733f44f7bf43:docs/content/docs/backend/backend-database.mdx:generic-api-key:139
