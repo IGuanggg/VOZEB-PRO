@@ -133,7 +133,8 @@ test("canvas keeps editing, selection, linking and persistence fluid", async ({ 
         patchRequests.length = 0;
         const beforeDrag = await sourceNode.boundingBox();
         expect(beforeDrag).not.toBeNull();
-        const dragStart = { x: beforeDrag!.x + beforeDrag!.width / 2, y: beforeDrag!.y + beforeDrag!.height - 28 };
+        // 正文区保持可直接输入；从节点顶部留白拖动，避免把文本编辑区误当成拖动手柄。
+        const dragStart = { x: beforeDrag!.x + beforeDrag!.width / 2, y: beforeDrag!.y + 16 };
         await page.mouse.move(dragStart.x, dragStart.y);
         await page.mouse.down();
         await page.mouse.move(dragStart.x + 90, dragStart.y + 45, { steps: 8 });
@@ -837,6 +838,7 @@ test("canvas Agent attachment remove badge stays compact and theme readable", as
             buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl3kgAAAABJRU5ErkJggg==", "base64"),
         });
 
+        await expect(panel.getByRole("status", { name: "reference.png 上传中" })).toHaveCount(0, { timeout: 30_000 });
         const removeButton = panel.getByRole("button", { name: "移除参考素材：reference.png" });
         const badge = removeButton.locator(":scope > span");
         await expect(removeButton).toBeVisible();
